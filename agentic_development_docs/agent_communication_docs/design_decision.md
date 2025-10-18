@@ -1,0 +1,2 @@
+- LiteLLM adapter kept optional via `llm` extra to avoid heavy dependencies in base install while maintaining default workflow behavior when installed.
+- Visualization module includes PCA fallback when `umap-learn` is absent so tests run in minimal environments while preserving intended functionality when optional deps are present.

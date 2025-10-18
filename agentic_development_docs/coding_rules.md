@@ -2,11 +2,13 @@
   - When writing non-obvious functions or code blocks, include a concise explanation (either a docstring or an inline comment) so the intent remains clear.
   - As far as possible, keep the development code simple and straight-forward.
   - You are an expert software engineer with 30 years of programming experience. Follow best programming practices.
+  - Take your time to think, no hurry.
   - If there are TODOs, add as comment in the same code file while you are implementing them.
   - Keep the code simple as much as possible. avoid handling extra cases that are far away from the expectation instruction. If handling those extra cases are very necessary and important, then you can handle them.
 
 ## Development communication
   - If you have any question about the implementation, which is an important one, then you can stop and ask me before continuing the implementation.
+  - If there are TODOs, add as comment in the same code file while you are implementing them.
   - For any useful non-intuitive communication or logging during coding implementation, write documents to `agentic_development_docs/agent_communication_docs`. These communication are Not mandatory - so don't write just for the sake of it, but for development purposes.
     - Examples include: assumptions made during implementation in the file @agentic_development_docs/agent_communication_docs/assumptions_made_by_agent.md
     - Any different Design decision apart from given in instruction in @agentic_development_docs/agent_communication_docs/design_decision.md

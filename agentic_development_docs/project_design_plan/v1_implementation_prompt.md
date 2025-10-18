@@ -5,6 +5,7 @@ Implement only the **v0.1 – Minimal Embedding & Clustering Pipeline**  for the
 - Core requirements live in `@agentic_development_docs/project_design_plan/0_constella_design_plan.md`. Stay strictly within the v0.1 scope; do **not** begin work on v0.2+ features.
 - Follow project guardrails in `@agentic_development_docs/general_rules.md`.
 - Adhere to style expectations in `@agentic_development_docs/coding_rules.md`.
+- The initial plan of this project is given here agentic_development_docs/project_design_plan/initial_plan.md for an idea of the motivation.
 - For inspiration of the earlier implementation, you can read and go through this, but this is older version, don't copy verbatim, also the APIs could have changed:
     - clustering implementation is present in old_code/clustering_manager.py and old_code/clustering_manager2.py
     - Clustering plot as UMAP image is old_code/umap.png
@@ -23,6 +24,7 @@ Implement only the **v0.1 – Minimal Embedding & Clustering Pipeline**  for the
    - `pipelines/workflow.py`: `cluster_texts(texts_or_units, clustering_config, visualization_config=None)` orchestrating embedding → clustering → optional visualization, returning a `ClusterAssignment` and any generated artifact paths.
 3. Module-level logging (basic configuration only; defer YAML settings to later versions).
 4. Tests under `tests/` validating deterministic clustering, silhouette branch behavior, workflow integration with mock embeddings, and UMAP projection shape/file creation.
+5. Create and update README.md file with the README instructions of v0.1 features of the project.
 
 ## Implementation Constraints
 - Keep operations deterministic by respecting provided seeds and controlling any random sources.
@@ -33,5 +35,5 @@ Implement only the **v0.1 – Minimal Embedding & Clustering Pipeline**  for the
 - Run the full test suite (and any linters already configured) before delivery; address failures.
 
 ## Output Expectations
-- Provide source code, tests, and any generated artifacts within the repository. No README or external documentation updates unless explicitly requested.
+- Provide source code, tests, and any generated artifacts within the repository.
 - Summarize implementation results succinctly - writing to markdown file in the path @agentic_development_docs/agent_communication_docs , after completion, highlighting tests executed and their outcomes.

@@ -1,3 +1,13 @@
 old_code/
 old_code/*
 .vscode/
+
+.env
+**/.env.local
+
+# Python build / cache artifacts
+*.egg-info/
+**/__pycache__/
+
+node_modules/*
+node_modules/
