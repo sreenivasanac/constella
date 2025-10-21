@@ -27,8 +27,7 @@ def test_cluster_texts_with_mock_embeddings(tmp_path: Path):
     assignment, artifacts, returned_embeddings = cluster_texts(
         texts,
         clustering_config=config,
-        visualization_config=viz_config,
-        embedding_provider=provider,
+        visualization_config=viz_config
     )
 
     assert assignment.silhouette_score is not None
@@ -48,8 +47,7 @@ def test_cluster_texts_accepts_content_units():
 
     assignment, artifacts, returned_embeddings = cluster_texts(
         units,
-        clustering_config=config,
-        embedding_provider=provider,
+        clustering_config=config
     )
 
     assert set(assignment.assignments) == {0, 1}

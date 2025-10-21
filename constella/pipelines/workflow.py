@@ -11,7 +11,7 @@ import numpy as np
 from constella.config.schemas import ClusteringConfig, VisualizationConfig
 from constella.data.models import ClusterAssignment, ContentUnit
 from constella.embeddings.base import EmbeddingProvider
-from constella.embeddings.adapters import LiteLLMEmbeddingProvider
+from constella.embeddings.adapters import LiteLLMEmbeddingFireworksProvider
 from constella.visualization.umap import project_embeddings, save_umap_plot
 from constella.clustering.kmeans import run_kmeans
 
@@ -36,7 +36,8 @@ def _extract_texts(units_or_texts: Iterable[str | ContentUnit]) -> Tuple[List[Co
 def cluster_texts(
     texts_or_units: Sequence[str | ContentUnit],
     clustering_config: Optional[ClusteringConfig] = None,
-    visualization_config: Optional[VisualizationConfig] = None) -> Tuple[ClusterAssignment, Optional[List[Path]], List[List[float]]]:
+    visualization_config: Optional[VisualizationConfig] = None
+) -> Tuple[ClusterAssignment, Optional[List[Path]], List[List[float]]]:
     """Run the end-to-end embedding, clustering, and optional visualization workflow."""
 
     if not texts_or_units:
@@ -45,7 +46,7 @@ def cluster_texts(
     units, texts = _extract_texts(texts_or_units)
     config = clustering_config or ClusteringConfig()
 
-    provider = LiteLLMEmbeddingProvider()
+    provider = LiteLLMEmbeddingFireworksProvider()
 
     LOGGER.info("Generating embeddings for %s texts", len(texts))
     embeddings = provider.embed_texts(texts)
