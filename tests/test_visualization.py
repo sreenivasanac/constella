@@ -46,7 +46,6 @@ def test_create_umap_plot_html_generates_hoverable_artifact(tmp_path):
         config,
         units,
         title="Sample",
-        render_streamlit=False,
     )
 
     assert html_path.exists()
@@ -64,7 +63,7 @@ def test_create_umap_plot_html_validates_lengths(tmp_path):
     config = VisualizationConfig(output_path=tmp_path / "plot.png", random_state=7)
 
     with pytest.raises(ValueError):
-        create_umap_plot_html(projection, labels, config, units, render_streamlit=False)
+        create_umap_plot_html(projection, labels, config, units)
 
 
 

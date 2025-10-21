@@ -1,1 +1,0 @@
-- LiteLLM adapter kept optional via `llm` extra to avoid heavy dependencies in base install while maintaining default workflow behavior when installed.

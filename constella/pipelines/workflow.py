@@ -11,10 +11,7 @@ import numpy as np
 from constella.config.schemas import ClusteringConfig, VisualizationConfig
 from constella.data.models import ClusterAssignment, ContentUnit
 from constella.embeddings.base import EmbeddingProvider
-try:  # pragma: no cover - optional dependency
-    from constella.embeddings.adapters import LiteLLMEmbeddingProvider
-except ImportError:  # pragma: no cover
-    LiteLLMEmbeddingProvider = None  # type: ignore
+from constella.embeddings.adapters import LiteLLMEmbeddingProvider
 from constella.visualization.umap import project_embeddings, save_umap_plot
 from constella.clustering.kmeans import run_kmeans
 
@@ -49,14 +46,16 @@ def cluster_texts(
 
     units, texts = _extract_texts(texts_or_units)
     config = clustering_config or ClusteringConfig()
-    if embedding_provider is None:
-        if LiteLLMEmbeddingProvider is None:
-            raise RuntimeError(
-                "LiteLLM is unavailable. Install constella with the 'llm' extra or provide a custom embedding provider."
-            )
-        provider = LiteLLMEmbeddingProvider()
-    else:
-        provider = embedding_provider
+    del embedding_provider # for now custom embedding_provider is not supported
+    # if embedding_provider is None:
+    if LiteLLMEmbeddingProvider is None:
+        # only LiteLLM is supported
+        raise RuntimeError(
+            "LiteLLM is unavailable. Install constella with the 'llm' extra or provide a custom embedding provider."
+        )
+    provider = LiteLLMEmbeddingProvider()
+    # else:
+    #     provider = embedding_provider
 
     LOGGER.info("Generating embeddings for %s texts", len(texts))
     embeddings = provider.embed_texts(texts)

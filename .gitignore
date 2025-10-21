@@ -1,5 +1,11 @@
 old_code/
 old_code/*
+artifacts/
+artifacts/*
+agentic_development_docs/project_design_plan/TODO.md
+
+rough_work/
+
 .vscode/
 
 .env

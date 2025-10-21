@@ -67,9 +67,31 @@ def _select_cluster_count(vectors: np.ndarray, config: ClusteringConfig) -> int:
 def run_kmeans(vectors: Iterable[Sequence[float]], config: ClusteringConfig) -> ClusterAssignment:
     """Execute deterministic K-Means and return assignment metadata."""
 
-    array = np.array(list(vectors), dtype=float)
+    array = np.array(list(vectors), dtype=np.float64)
     if array.ndim != 2 or array.size == 0:
         raise ValueError("Input vectors must form a non-empty 2D array.")
+
+    if not np.all(np.isfinite(array)):
+        LOGGER.warning("Non-finite values detected in embedding vectors; replacing with zeros.")
+        array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+
+    if np.all(array == 0):
+        raise ValueError("All embedding vectors are zero after sanitization; cannot run K-Means.")
+
+    # TODO come back to this and verify if these are correct, and if these are needed
+    means = np.mean(array, axis=0, keepdims=True)
+    array = array - means
+    stds = np.std(array, axis=0, keepdims=True)
+    stds[stds == 0.0] = 1.0
+    array = array / stds
+
+    max_abs = np.max(np.abs(array))
+    if max_abs > 1e6:
+        LOGGER.warning("Extremely large magnitudes detected after normalization;")
+        LOGGER.warning("applying additional scaling.")
+        array = array / max_abs
+
+    array = np.clip(array, -1e6, 1e6, out=array)
 
     n_clusters = _select_cluster_count(array, config)
     n_clusters = min(n_clusters, len(array))

@@ -28,7 +28,7 @@
     pipelines/
       workflow.py         # end-to-end orchestration utilities
     evaluation/
-      metrics.py          # internal diagnostics (silhouette, inertia, etc.)
+      metrics.py          # internal diagnostics (silhouette, inertia, etc.) introduced v0.4
     visualization/
       umap.py             # 2D projection + plotting utilities
     utils/
@@ -76,7 +76,7 @@
 
 **Data Flow**
 1. Client passes `List[ContentUnit]` or `List[str]` with optional lightweight workflow parameters.
-2. `cluster_texts` instantiates the LiteLLM-based embedding provider (additional registry logic arrives in v0.3).
+2. `cluster_texts` instantiates the LiteLLM-based embedding provider
 3. Embedding vectors are generated in-memory, converted to `np.ndarray`, and used to evaluate silhouette scores across candidate cluster counts, to find optimum number of clusters, before running K-Means with the optimum (or fallback) `n_clusters`.
 4. UMAP projection is computed from the embedding matrix for visualization. If visualization is requested, persist the plot as an image/PDF (UMAP coordinates need not be returned).
 5. Output `ClusterAssignment` object containing cluster assignments per ContentUnit, cluster centers, cluster sizes, and silhouette diagnostics.
@@ -159,6 +159,7 @@
   - Function `plot_clusters(projection, assignment, labels, output_path, theme_map)` replicating annotated scatter plots; include optional highlight for outliers (clusters with size < `min_cluster_size` or points beyond percentile threshold).
   - Support headless environments (fallback to Agg backend) and ensure file paths reside within caller-specified output directories.
 - `evaluation/metrics.py`: Provide `silhouette_score_safe`, `davies_bouldin_safe`, cluster size distribution summaries, and outlier flags.
+- `pipelines/workflow.py`: Allow callers to inject custom embedding providers and related components through configuration for offline/testing scenarios.
 - `pipelines/workflow.py`: Add optional call `generate_visual_diagnostics(outputs, viz_config)` generating UMAP projection + metrics JSON; ensure this stage is modular so headless/UMAP optional dependency can be toggled.
 - Extend configs to allow specifying visualization dependencies (`umap-learn`, `matplotlib`); guard import errors with clear messaging.
 

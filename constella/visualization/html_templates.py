@@ -5,7 +5,7 @@ from __future__ import annotations
 
 def build_umap_hover_html(
     *,
-    data_json: str,
+    data_script_path: str | None,
     title_json: str,
     width: int,
     height: int,
@@ -15,6 +15,10 @@ def build_umap_hover_html(
     y_max: float,
 ) -> str:
     """Return an HTML document embedding an interactive hoverable UMAP scatter."""
+
+    script_include = ""
+    if data_script_path:
+        script_include = f"  <script src=\"{data_script_path}\" defer></script>\n"
 
     return f"""<!DOCTYPE html>
 <html lang=\"en\">
@@ -81,8 +85,8 @@ def build_umap_hover_html(
     <svg id=\"umap-plot\" viewBox=\"0 0 {width} {height}\" role=\"img\" aria-labelledby=\"plot-title\"></svg>
     <div id=\"tooltip\" class=\"tooltip\"></div>
   </div>
-  <script>
-    const data = {data_json};
+{script_include}  <script>
+    const DATA_READY_EVENT = "umap-data-ready";
     const pageTitle = {title_json};
     const width = {width};
     const height = {height};
@@ -92,13 +96,20 @@ def build_umap_hover_html(
     const yMin = {y_min};
     const yMax = {y_max};
 
-    document.getElementById("plot-title").textContent = pageTitle;
-
     const svg = document.getElementById("umap-plot");
     const tooltip = document.getElementById("tooltip");
 
     svg.setAttribute("width", width);
     svg.setAttribute("height", height);
+
+    let plotInitialized = false;
+
+    function getExternalData() {{
+      if (Array.isArray(window.UMAP_DATA)) {{
+        return window.UMAP_DATA;
+      }}
+      return null;
+    }}
 
     function scaleX(value) {{
       if (xMax - xMin === 0) {{
@@ -114,52 +125,98 @@ def build_umap_hover_html(
       return height - padding - ((value - yMin) / (yMax - yMin)) * (height - padding * 2);
     }}
 
-    function showTooltip(event, point) {{
+    function showTooltip(evt, point) {{
       tooltip.innerHTML = "";
 
       const labelLine = document.createElement("strong");
-      labelLine.textContent = `Cluster ${'${'}point.label${'}'}`;
+      const labelValue = point && point.label !== undefined ? point.label : "Unknown";
+      labelLine.textContent = "Cluster " + labelValue;
       tooltip.appendChild(labelLine);
 
       const idLine = document.createElement("div");
       idLine.className = "tooltip-id";
-      idLine.textContent = point.identifier;
+      idLine.textContent = point && point.identifier ? point.identifier : "";
       tooltip.appendChild(idLine);
 
       const textLine = document.createElement("div");
       textLine.className = "tooltip-text";
-      textLine.textContent = point.text;
+      textLine.textContent = point && point.text ? point.text : "";
       tooltip.appendChild(textLine);
 
       tooltip.style.display = "block";
-      tooltip.style.left = `${'${'}event.pageX + 12${'}'}px`;
-      tooltip.style.top = `${'${'}event.pageY + 12${'}'}px`;
+      const pageX = evt && typeof evt.pageX === "number" ? evt.pageX : 0;
+      const pageY = evt && typeof evt.pageY === "number" ? evt.pageY : 0;
+      tooltip.style.left = String(pageX + 12) + "px";
+      tooltip.style.top = String(pageY + 12) + "px";
     }}
 
-    function moveTooltip(event) {{
-      tooltip.style.left = `${'${'}event.pageX + 12${'}'}px`;
-      tooltip.style.top = `${'${'}event.pageY + 12${'}'}px`;
+    function moveTooltip(evt) {{
+      const pageX = evt && typeof evt.pageX === "number" ? evt.pageX : 0;
+      const pageY = evt && typeof evt.pageY === "number" ? evt.pageY : 0;
+      tooltip.style.left = String(pageX + 12) + "px";
+      tooltip.style.top = String(pageY + 12) + "px";
     }}
 
     function hideTooltip() {{
       tooltip.style.display = "none";
     }}
 
-    data.forEach((point) => {{
-      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-      circle.setAttribute("cx", scaleX(point.x));
-      circle.setAttribute("cy", scaleY(point.y));
-      circle.setAttribute("r", 5);
-      circle.setAttribute("fill", point.color);
-      circle.setAttribute("stroke", "#1f2937");
-      circle.setAttribute("stroke-width", 0.5);
+    function renderPlot(data) {{
+      if (plotInitialized) {{
+        return;
+      }}
+      if (!Array.isArray(data)) {{
+        return;
+      }}
 
-      circle.addEventListener("mouseenter", (event) => showTooltip(event, point));
-      circle.addEventListener("mousemove", moveTooltip);
-      circle.addEventListener("mouseleave", hideTooltip);
+      plotInitialized = true;
+      document.getElementById("plot-title").textContent = pageTitle;
+      svg.textContent = "";
 
-      svg.appendChild(circle);
-    }});
+      data.forEach((point) => {{
+        const coordX = point && typeof point.x === "number" ? point.x : 0;
+        const coordY = point && typeof point.y === "number" ? point.y : 0;
+        const fillColor = point && point.color ? point.color : "#1f77b4";
+        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        circle.setAttribute("cx", scaleX(coordX));
+        circle.setAttribute("cy", scaleY(coordY));
+        circle.setAttribute("r", 5);
+        circle.setAttribute("fill", fillColor);
+        circle.setAttribute("stroke", "#1f2937");
+        circle.setAttribute("stroke-width", 0.5);
+
+        circle.addEventListener("mouseenter", (event) => showTooltip(event, point));
+        circle.addEventListener("mousemove", moveTooltip);
+        circle.addEventListener("mouseleave", hideTooltip);
+
+        svg.appendChild(circle);
+      }});
+    }}
+
+    function scheduleRender() {{
+      const immediateData = getExternalData();
+      if (Array.isArray(immediateData)) {{
+        renderPlot(immediateData);
+        return;
+      }}
+
+      document.addEventListener(
+        DATA_READY_EVENT,
+        () => {{
+          const readyData = getExternalData();
+          if (Array.isArray(readyData)) {{
+            renderPlot(readyData);
+          }}
+        }},
+        {{ once: true }}
+      );
+    }}
+
+    if (document.readyState === "loading") {{
+      document.addEventListener("DOMContentLoaded", scheduleRender, {{ once: true }});
+    }} else {{
+      scheduleRender();
+    }}
   </script>
 </body>
 </html>

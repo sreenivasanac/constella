@@ -14,8 +14,8 @@ class ClusteringConfig:
     seed: int = 42
     fallback_n_clusters: int = 5
     min_cluster_count: int = 2
-    max_candidate_clusters: int = 8
-    enable_silhouette_selection: bool = True
+    max_candidate_clusters: int = 10
+    enable_silhouette_selection: bool = False
     silhouette_sample_size: Optional[int] = None
 
 

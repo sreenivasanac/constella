@@ -10,7 +10,7 @@
      {name = "Constella Contributors"}
  ]
  readme = "README.md"
- requires-python = ">=3.10"
+ requires-python = ">=3.10,<=3.13"
  license = {text = "MIT"}
  dependencies = [
     "numpy>=1.24",
@@ -19,12 +19,10 @@
     "umap-learn>=0.5.5",
     "numba>=0.56,<0.62",
     "streamlit>=1.37",
+    "litellm>=1.39.1",
  ]
 
 [project.optional-dependencies]
-llm = [
-    "litellm>=1.39.1",
-]
 test = [
      "pytest>=7.4",
      "pytest-mock>=3.10",

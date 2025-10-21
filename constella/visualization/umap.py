@@ -57,13 +57,45 @@ def save_umap_plot(
     if projection.shape[1] != 2:
         raise ValueError("Projection must have exactly two dimensions for plotting.")
 
+    unique_labels = sorted({int(label) for label in labels})
+    if len(unique_labels) <= 10:
+        cmap_name = "tab10"
+    elif len(unique_labels) <= 20:
+        cmap_name = "tab20"
+    else:
+        cmap_name = "gist_ncar"
+
+    base_cmap = colormaps.get_cmap(cmap_name)
+    if unique_labels:
+        samples = np.linspace(0.0, 1.0, len(unique_labels), endpoint=False)
+        color_lookup = {
+            label_value: colors.to_hex(base_cmap(sample))
+            for label_value, sample in zip(unique_labels, samples)
+        }
+    else:
+        color_lookup = {}
+    point_colors = [color_lookup.get(int(label), "#1f77b4") for label in labels]
+
     output_path = Path(config.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     LOGGER.info("Saving UMAP plot to %s", output_path)
     plt.figure(figsize=(8, 6))
-    scatter = plt.scatter(projection[:, 0], projection[:, 1], c=labels, cmap="Spectral", s=20)
-    plt.colorbar(scatter, label="Cluster")
+    scatter = plt.scatter(projection[:, 0], projection[:, 1], c=point_colors, s=20)
+    if unique_labels:
+        legend_handles = [
+            plt.Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="",
+                markerfacecolor=color_lookup[label_value],
+                markeredgecolor=color_lookup[label_value],
+                label=str(label_value),
+            )
+            for label_value in unique_labels
+        ]
+        plt.legend(handles=legend_handles, title="Cluster", fontsize="small", loc="best")
     if title:
         plt.title(title)
     plt.xlabel("UMAP-1")
@@ -78,19 +110,23 @@ def save_umap_plot(
     return output_path
 
 
+def _truncate_text_lines(text: str, max_lines: int) -> str:
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    return "\n".join(lines[:max_lines])
+
+
 def create_umap_plot_html(
     projection: np.ndarray,
     labels: Sequence[int],
     config: VisualizationConfig,
     texts_or_units: Sequence[str | ContentUnit],
     title: Optional[str] = None,
-    output_path: Optional[Path] = None,
-    render_streamlit: bool = True,
+    output_path: Optional[Path] = None
 ) -> Path:
     """Persist an interactive HTML scatter plot with hover tooltips.
 
-    When ``render_streamlit`` is True and Streamlit is installed, the HTML snippet
-    is embedded immediately via ``st.components.v1.html``.
     """
 
     if projection.ndim != 2 or projection.shape[1] != 2:
@@ -149,9 +185,17 @@ def create_umap_plot_html(
     y_min = float(np.min(projection[:, 1]))
     y_max = float(np.max(projection[:, 1]))
 
+    for point in points:
+        point["text"] = _truncate_text_lines(point["text"], 8)
+
+    data_json = json.dumps(points, ensure_ascii=False, indent=2)
+    title_json = json.dumps(title or "UMAP Projection", ensure_ascii=False)
+
+    data_script_path = target_path.with_name(f"{target_path.stem}_data.js")
+
     html_content = build_umap_hover_html(
-        data_json=json.dumps(points, ensure_ascii=False),
-        title_json=json.dumps(title or "UMAP Projection", ensure_ascii=False),
+        data_script_path=data_script_path.name,
+        title_json=title_json,
         width=width,
         height=height,
         x_min=x_min,
@@ -160,15 +204,14 @@ def create_umap_plot_html(
         y_max=y_max,
     )
 
+    data_script = (
+        "window.UMAP_DATA = "
+        f"{data_json};"
+        "document.dispatchEvent(new Event(\"umap-data-ready\"));\n"
+    )
+
     LOGGER.info("Saving interactive UMAP plot to %s", target_path)
     target_path.write_text(html_content, encoding="utf-8")
-
-    if render_streamlit:
-        try:
-            if title:
-                st.markdown(f"### {title}")
-            st_html(html_content, height=height + 120, scrolling=True)
-        except Exception as exc:  # pragma: no cover - depends on runtime
-            LOGGER.debug("Streamlit rendering skipped: %s", exc, exc_info=True)
+    data_script_path.write_text(data_script, encoding="utf-8")
 
     return target_path
