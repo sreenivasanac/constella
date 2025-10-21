@@ -7,6 +7,9 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 
+_litellm_logger = logging.getLogger("LiteLLM")
+_litellm_logger.propagate = False
+
 __all__ = [
     "__version__",
 ]

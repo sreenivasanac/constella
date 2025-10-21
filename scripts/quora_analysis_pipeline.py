@@ -19,8 +19,6 @@ import psycopg
 
 from constella.config.schemas import ClusteringConfig, VisualizationConfig
 from constella.data.models import ContentUnit
-from constella.embeddings.adapters import LiteLLMEmbeddingProvider
-from constella.embeddings.base import EmbeddingProvider, InMemoryEmbeddingProvider
 from constella.pipelines.workflow import cluster_texts
 from constella.visualization.umap import create_umap_plot_html, project_embeddings, save_umap_plot
 

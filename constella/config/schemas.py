@@ -15,9 +15,10 @@ class ClusteringConfig:
     fallback_n_clusters: int = 5
     min_cluster_count: int = 2
     max_candidate_clusters: int = 10
-    enable_silhouette_selection: bool = False
+    enable_silhouette_selection: bool = True
     silhouette_sample_size: Optional[int] = None
-
+    enable_elbow_selection: bool = True
+    enable_davies_bouldin_selection: bool = True
 
 @dataclass(frozen=True)
 class VisualizationConfig:
