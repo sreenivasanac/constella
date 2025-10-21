@@ -36,9 +36,7 @@ def _extract_texts(units_or_texts: Iterable[str | ContentUnit]) -> Tuple[List[Co
 def cluster_texts(
     texts_or_units: Sequence[str | ContentUnit],
     clustering_config: Optional[ClusteringConfig] = None,
-    visualization_config: Optional[VisualizationConfig] = None,
-    embedding_provider: Optional[EmbeddingProvider] = None,
-) -> Tuple[ClusterAssignment, Optional[List[Path]]]:
+    visualization_config: Optional[VisualizationConfig] = None) -> Tuple[ClusterAssignment, Optional[List[Path]], List[List[float]]]:
     """Run the end-to-end embedding, clustering, and optional visualization workflow."""
 
     if not texts_or_units:
@@ -46,16 +44,8 @@ def cluster_texts(
 
     units, texts = _extract_texts(texts_or_units)
     config = clustering_config or ClusteringConfig()
-    del embedding_provider # for now custom embedding_provider is not supported
-    # if embedding_provider is None:
-    if LiteLLMEmbeddingProvider is None:
-        # only LiteLLM is supported
-        raise RuntimeError(
-            "LiteLLM is unavailable. Install constella with the 'llm' extra or provide a custom embedding provider."
-        )
+
     provider = LiteLLMEmbeddingProvider()
-    # else:
-    #     provider = embedding_provider
 
     LOGGER.info("Generating embeddings for %s texts", len(texts))
     embeddings = provider.embed_texts(texts)
@@ -67,7 +57,7 @@ def cluster_texts(
         path = save_umap_plot(projection, assignment.assignments, visualization_config)
         artifacts = [path]
 
-    return assignment, artifacts
+    return assignment, artifacts, embeddings
 
 
 __all__ = ["cluster_texts"]

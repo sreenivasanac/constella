@@ -104,7 +104,7 @@ def serialize_assignments(output_dir: Path, assignment, units: Sequence[ContentU
     return output_path
 
 
-def run_pipeline(args: argparse.Namespace, provider: Optional[EmbeddingProvider] = None) -> None:
+def run_pipeline(args: argparse.Namespace) -> None:
     logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(message)s")
 
     if not args.database_url:
@@ -124,12 +124,9 @@ def run_pipeline(args: argparse.Namespace, provider: Optional[EmbeddingProvider]
     png_path = output_dir / f"{args.umap_filename}.png"
     html_path = output_dir / f"{args.umap_filename}.html"
 
-    base_provider = provider or LiteLLMEmbeddingProvider()
-    LOGGER.info("Generating embeddings using %s", base_provider.__class__.__name__)
-    embeddings = base_provider.embed_texts([unit.text for unit in units])
 
-    LOGGER.info("Running clustering with precomputed embeddings")
-    assignment, _ = cluster_texts(
+    LOGGER.info("Running clustering workflow")
+    assignment, _, embeddings = cluster_texts(
         units,
         clustering_config=clustering_config,
         visualization_config=None

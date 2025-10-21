@@ -24,7 +24,7 @@ def test_cluster_texts_with_mock_embeddings(tmp_path: Path):
     config = ClusteringConfig(seed=5, fallback_n_clusters=2)
     viz_config = VisualizationConfig(output_path=tmp_path / "plot.png", random_state=5)
 
-    assignment, artifacts = cluster_texts(
+    assignment, artifacts, returned_embeddings = cluster_texts(
         texts,
         clustering_config=config,
         visualization_config=viz_config,
@@ -34,6 +34,7 @@ def test_cluster_texts_with_mock_embeddings(tmp_path: Path):
     assert assignment.silhouette_score is not None
     assert artifacts is not None
     assert Path(artifacts[0]).exists()
+    assert returned_embeddings == embeddings.tolist()
 
 
 def test_cluster_texts_accepts_content_units():
@@ -45,7 +46,7 @@ def test_cluster_texts_accepts_content_units():
     provider = InMemoryEmbeddingProvider(embeddings)
     config = ClusteringConfig(seed=2, fallback_n_clusters=2, enable_silhouette_selection=False)
 
-    assignment, artifacts = cluster_texts(
+    assignment, artifacts, returned_embeddings = cluster_texts(
         units,
         clustering_config=config,
         embedding_provider=provider,
@@ -53,3 +54,4 @@ def test_cluster_texts_accepts_content_units():
 
     assert set(assignment.assignments) == {0, 1}
     assert artifacts is None
+    assert returned_embeddings == embeddings.tolist()

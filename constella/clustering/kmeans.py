@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -39,11 +40,22 @@ def _select_cluster_count(vectors: np.ndarray, config: ClusteringConfig) -> int:
     best_score = -1.0
     best_k = config.fallback_n_clusters
 
+    # Check for potential numerical issues
+    data_range = np.max(vectors) - np.min(vectors)
+    init_method = 'random' if data_range > 1e3 else 'k-means++'
+
     for k in candidates:
         if k >= len(vectors):
             continue
-        km = KMeans(n_clusters=k, random_state=config.seed, n_init=10)
-        labels = km.fit_predict(vectors)
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning, module='sklearn')
+                km = KMeans(n_clusters=k, init=init_method, random_state=config.seed, n_init=10)
+                labels = km.fit_predict(vectors)
+        except (RuntimeWarning, FloatingPointError, Exception) as e:
+            LOGGER.error(f"Numerical error in K-Means fitting for k={k}: {e}")
+            continue
+
         if len(set(labels)) == 1:
             continue
         try:
@@ -53,7 +65,8 @@ def _select_cluster_count(vectors: np.ndarray, config: ClusteringConfig) -> int:
                 sample_size=sample_size,
                 random_state=rs,
             )
-        except ValueError:
+        except (ValueError, RuntimeWarning, FloatingPointError, Exception) as e:
+            LOGGER.error(f"Error in silhouette score calculation for k={k}: {e}")
             continue
         LOGGER.debug("Silhouette score for k=%s: %s", k, score)
         if score > best_score:
@@ -71,38 +84,31 @@ def run_kmeans(vectors: Iterable[Sequence[float]], config: ClusteringConfig) -> 
     if array.ndim != 2 or array.size == 0:
         raise ValueError("Input vectors must form a non-empty 2D array.")
 
-    if not np.all(np.isfinite(array)):
-        LOGGER.warning("Non-finite values detected in embedding vectors; replacing with zeros.")
-        array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
-
-    if np.all(array == 0):
-        raise ValueError("All embedding vectors are zero after sanitization; cannot run K-Means.")
-
-    # TODO come back to this and verify if these are correct, and if these are needed
     means = np.mean(array, axis=0, keepdims=True)
     array = array - means
+
     stds = np.std(array, axis=0, keepdims=True)
-    stds[stds == 0.0] = 1.0
+    stds[stds == 0] = 1.0
     array = array / stds
-
-    max_abs = np.max(np.abs(array))
-    if max_abs > 1e6:
-        LOGGER.warning("Extremely large magnitudes detected after normalization;")
-        LOGGER.warning("applying additional scaling.")
-        array = array / max_abs
-
-    array = np.clip(array, -1e6, 1e6, out=array)
 
     n_clusters = _select_cluster_count(array, config)
     n_clusters = min(n_clusters, len(array))
-    kmeans = KMeans(n_clusters=n_clusters, random_state=config.seed, n_init=10)
-    labels = kmeans.fit_predict(array)
+    
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning, module='sklearn')
+            kmeans = KMeans(n_clusters=n_clusters, init='k-means++', n_init=10, random_state=config.seed)
+            labels = kmeans.fit_predict(array)
+    except (RuntimeWarning, FloatingPointError, Exception) as e:
+        LOGGER.error(f"Critical numerical error in main K-Means fitting: {e}")
+        raise
 
     silhouette = None
     if len(set(labels)) > 1:
         try:
             silhouette = silhouette_score(array, labels)
-        except ValueError:
+        except (ValueError, RuntimeWarning, FloatingPointError, Exception) as e:
+            LOGGER.error(f"Error calculating final silhouette score: {e}")
             silhouette = None
 
     LOGGER.info("Clustering completed with inertia=%s", kmeans.inertia_)
