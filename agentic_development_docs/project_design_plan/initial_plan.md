@@ -1,7 +1,7 @@
 # Constella - token-efficient auto-grouping and auto-labelling library for large text-based collection of content
 
 ## Problem
-Large text-based collection of content (e.g., 10,000 emails, bookmarks, messages, documents, images via image-descriptions) are expensive to intelligently and automatically group, organize and label directly with LLMs because of token costs and degraded accuracy at long context lengths. This project Constella groups semantically similar content-units first -> in a scalable, model‑agnostic way —> second optionally applies an LLM call to a much smaller per‑group representative subset for automated labeling.
+Large text-based collection of content (e.g., 10,000 emails, bookmarks, messages, documents, images via image-descriptions) are expensive to intelligently and automatically group, organize and label directly with LLMs because of token costs and degraded accuracy at long context lengths. This project Constella groups semantically similar content-units first -> in a scalable, LLM-model‑agnostic way through vector embeddings —> second optionally applies an LLM call to a much smaller per‑group representative subset for automated labeling.
 
 ## Terminology
 - "Content-unit" refers to the individual emails, messages, bookmark content, or text chunks.
@@ -33,7 +33,8 @@ The goal is a clear, practical pipeline that reduces LLM token usage while prese
 
 ## Minimal workflow
 - Input: list of texts plus configuration.
-- Embed in batches for throughput and memory efficiency, then run K‑Means to obtain cluster-groups and cluster-centers.
+- Create embedding of the texts, then run K‑Means to obtain cluster-groups and cluster-centers.
+  - Embed in batches for throughput and memory efficiency for large number of inputs.
 - When clusters contain many content-units, compute optional representatives per cluster by nearest‑to‑centroid.
 - Call an external LLM on each cluster’s representatives to propose a label (Optional).
 - Output artifacts: cluster assignments, cluster centers, cluster sizes, representative indices, any LLM‑generated labels (if used).
