@@ -5,7 +5,7 @@ import litellm
 FIREWORKS_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 FIREWORKS_API_BASE = "https://api.fireworks.ai/inference/v1"
 
-
+# https://fireworks.ai/docs/guides/querying-embeddings-models
 def _get_fireworks_api_key() -> str:
     api_key = os.getenv("FIREWORKS_API_KEY") or os.getenv("FIREWORKS_AI_API_KEY")
     if not api_key:

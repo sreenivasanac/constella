@@ -18,6 +18,8 @@ from constella.data.models import ClusterAssignment
 LOGGER = logging.getLogger(__name__)
 
 
+# https://www.geeksforgeeks.org/machine-learning/ml-determine-the-optimal-value-of-k-in-k-means-clustering/
+
 def _candidate_clusters(config: ClusteringConfig, sample_size: int) -> Sequence[int]:
     """Derive feasible cluster counts constrained by config limits and sample size."""
     max_candidates = min(config.max_candidate_clusters, sample_size - 1)
@@ -31,6 +33,24 @@ def _candidate_clusters(config: ClusteringConfig, sample_size: int) -> Sequence[
         base_range.append(min(config.fallback_n_clusters, sample_size))
     unique = sorted({k for k in base_range if 1 < k <= sample_size})
     return unique or [min(sample_size, max(2, config.fallback_n_clusters))]
+
+
+def _resolve_kmeans_init(vectors: np.ndarray) -> str:
+    data_range = np.max(vectors) - np.min(vectors)
+    return 'random' if data_range > 1e3 else 'k-means++'
+
+
+def _fit_kmeans(
+    vectors: np.ndarray,
+    n_clusters: int,
+    seed: int,
+    init: str,
+) -> Tuple[KMeans, np.ndarray]:
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=RuntimeWarning, module='sklearn')
+        model = KMeans(n_clusters=n_clusters, init=init, n_init=10, random_state=seed)
+        labels = model.fit_predict(vectors)
+    return model, labels
 
 
 def _resolve_silhouette_sample_size(
@@ -91,7 +111,7 @@ def _safe_silhouette_score(
         LOGGER.exception("Unexpected error calculating silhouette score %s", context)
     return None
 
-
+# https://www.geeksforgeeks.org/machine-learning/davies-bouldin-index/
 def _safe_davies_bouldin_score(
     vectors: np.ndarray,
     labels: np.ndarray,
@@ -111,7 +131,7 @@ def _safe_davies_bouldin_score(
         LOGGER.exception("Unexpected error calculating Davies-Bouldin score %s", context)
     return None
 
-
+# https://www.perplexity.ai/search/elbow-method-kmeans-scikit-lea-jHTIQx3cSFKklK4Dq1tWWw#0
 def _select_elbow_k(candidates: Sequence[int], inertias: Sequence[float]) -> Optional[int]:
     if len(candidates) < 2 or len(candidates) != len(inertias):
         return None
@@ -140,9 +160,7 @@ def _evaluate_candidate_metrics(
 ) -> Dict[int, Dict[str, float]]:
     sample_size = config.silhouette_sample_size if config.enable_silhouette_selection else None
     rng = RandomState(config.seed)
-
-    data_range = np.max(vectors) - np.min(vectors)
-    init_method = 'random' if data_range > 1e3 else 'k-means++'
+    init_method = _resolve_kmeans_init(vectors)
 
     metrics: Dict[int, Dict[str, float]] = {}
 
@@ -150,10 +168,7 @@ def _evaluate_candidate_metrics(
         if k >= len(vectors):
             continue
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=RuntimeWarning, module='sklearn')
-                km = KMeans(n_clusters=k, init=init_method, random_state=config.seed, n_init=10)
-                labels = km.fit_predict(vectors)
+            km, labels = _fit_kmeans(vectors, k, config.seed, init_method)
         except (RuntimeWarning, FloatingPointError, Exception) as exc:
             LOGGER.error("Numerical error in K-Means fitting for k=%s: %s", k, exc)
             continue
@@ -266,25 +281,20 @@ def run_kmeans(vectors: Iterable[Sequence[float]], config: ClusteringConfig) -> 
 
     n_clusters = _select_cluster_count(array, config)
     n_clusters = min(n_clusters, len(array))
-    
+
     try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', category=RuntimeWarning, module='sklearn')
-            kmeans = KMeans(n_clusters=n_clusters, init='k-means++', n_init=10, random_state=config.seed)
-            labels = kmeans.fit_predict(array)
+        kmeans, labels = _fit_kmeans(array, n_clusters, config.seed, 'k-means++')
     except (RuntimeWarning, FloatingPointError, Exception) as e:
-        LOGGER.error(f"Critical numerical error in main K-Means fitting: {e}")
+        LOGGER.error("Critical numerical error in main K-Means fitting: %s", e)
         raise
 
-    silhouette = None
-    if len(set(labels)) > 1:
-        silhouette = _safe_silhouette_score(
-            array,
-            labels,
-            config.silhouette_sample_size,
-            RandomState(config.seed),
-            "for final clustering",
-        )
+    silhouette = _safe_silhouette_score(
+        array,
+        labels,
+        config.silhouette_sample_size,
+        RandomState(config.seed),
+        "for final clustering",
+    )
 
     LOGGER.info("Clustering completed with inertia=%s", kmeans.inertia_)
 

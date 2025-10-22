@@ -49,6 +49,22 @@ def build_umap_hover_html(
       border-radius: 6px;
       box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
     }}
+    .axes line,
+    .ticks line {{
+      stroke: #4b5563;
+      stroke-width: 1;
+      pointer-events: none;
+    }}
+    .ticks text {{
+      fill: #1f2937;
+      font-size: 0.7rem;
+    }}
+    .axis-label {{
+      fill: #1f2937;
+      font-size: 0.8rem;
+      font-weight: 600;
+      pointer-events: none;
+    }}
     .tooltip {{
       position: absolute;
       display: none;
@@ -77,6 +93,34 @@ def build_umap_hover_html(
     .tooltip .tooltip-text {{
       font-size: 0.85rem;
     }}
+    .legend {{
+      display: none;
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      max-width: 240px;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.94);
+      border: 1px solid rgba(17, 24, 39, 0.15);
+      border-radius: 6px;
+      box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+      gap: 8px;
+      grid-template-columns: 1fr;
+    }}
+    .legend-item {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85rem;
+      color: #111827;
+    }}
+    .legend-swatch {{
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      border: 1px solid rgba(17, 24, 39, 0.4);
+      flex-shrink: 0;
+    }}
   </style>
 </head>
 <body>
@@ -84,6 +128,7 @@ def build_umap_hover_html(
   <div class=\"plot-container\">
     <svg id=\"umap-plot\" viewBox=\"0 0 {width} {height}\" role=\"img\" aria-labelledby=\"plot-title\"></svg>
     <div id=\"tooltip\" class=\"tooltip\"></div>
+    <div id="legend" class="legend" aria-label="Cluster color mapping"></div>
   </div>
 {script_include}  <script>
     const DATA_READY_EVENT = "umap-data-ready";
@@ -98,6 +143,7 @@ def build_umap_hover_html(
 
     const svg = document.getElementById("umap-plot");
     const tooltip = document.getElementById("tooltip");
+    const legendContainer = document.getElementById("legend");
 
     svg.setAttribute("width", width);
     svg.setAttribute("height", height);
@@ -123,6 +169,52 @@ def build_umap_hover_html(
         return height / 2;
       }}
       return height - padding - ((value - yMin) / (yMax - yMin)) * (height - padding * 2);
+    }}
+
+    function generateTicks(min, max, steps = 5) {{
+      if (!Number.isFinite(min) || !Number.isFinite(max) || steps <= 0) {{
+        return [];
+      }}
+      if (min === max) {{
+        return [min];
+      }}
+      const increment = (max - min) / steps;
+      const ticks = [];
+      for (let i = 0; i <= steps; i += 1) {{
+        ticks.push(min + increment * i);
+      }}
+      return ticks;
+    }}
+
+    function createSvgLine(x1, y1, x2, y2, className) {{
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("x1", x1);
+      line.setAttribute("y1", y1);
+      line.setAttribute("x2", x2);
+      line.setAttribute("y2", y2);
+      if (className) {{
+        line.setAttribute("class", className);
+      }}
+      return line;
+    }}
+
+    function createSvgText(x, y, textContent, className) {{
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      text.setAttribute("x", x);
+      text.setAttribute("y", y);
+      text.textContent = textContent;
+      if (className) {{
+        text.setAttribute("class", className);
+      }}
+      return text;
+    }}
+
+    function formatTick(value) {{
+      if (!Number.isFinite(value)) {{
+        return "";
+      }}
+      const fixed = value.toFixed(2);
+      return fixed === "-0.00" ? "0.00" : fixed;
     }}
 
     function showTooltip(evt, point) {{
@@ -173,10 +265,95 @@ def build_umap_hover_html(
       document.getElementById("plot-title").textContent = pageTitle;
       svg.textContent = "";
 
+      const pointsGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      pointsGroup.setAttribute("class", "points");
+      const axesGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      axesGroup.setAttribute("class", "axes");
+      const ticksGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      ticksGroup.setAttribute("class", "ticks");
+      const labelsGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      labelsGroup.setAttribute("class", "axis-labels");
+
+      svg.appendChild(pointsGroup);
+      svg.appendChild(axesGroup);
+      svg.appendChild(ticksGroup);
+      svg.appendChild(labelsGroup);
+
+      const axes = [
+        {{ x1: padding, y1: height - padding, x2: width - padding, y2: height - padding }},
+        {{ x1: padding, y1: padding, x2: width - padding, y2: padding }},
+        {{ x1: padding, y1: padding, x2: padding, y2: height - padding }},
+        {{ x1: width - padding, y1: padding, x2: width - padding, y2: height - padding }},
+      ];
+
+      axes.forEach((coords) => {{
+        axesGroup.appendChild(createSvgLine(coords.x1, coords.y1, coords.x2, coords.y2));
+      }});
+
+      const xTicks = generateTicks(xMin, xMax, 5);
+      const yTicks = generateTicks(yMin, yMax, 5);
+      const tickLength = 8;
+
+      xTicks.forEach((tickValue) => {{
+        const xPos = scaleX(tickValue);
+        ticksGroup.appendChild(createSvgLine(xPos, height - padding, xPos, height - padding + tickLength));
+        ticksGroup.appendChild(createSvgLine(xPos, padding, xPos, padding - tickLength));
+
+        const labelText = formatTick(tickValue);
+        const bottomLabel = createSvgText(xPos, height - padding + tickLength + 10, labelText, "tick-label");
+        bottomLabel.setAttribute("text-anchor", "middle");
+        bottomLabel.setAttribute("dominant-baseline", "hanging");
+        ticksGroup.appendChild(bottomLabel);
+
+        const topLabel = createSvgText(xPos, padding - tickLength - 4, labelText, "tick-label");
+        topLabel.setAttribute("text-anchor", "middle");
+        topLabel.setAttribute("dominant-baseline", "baseline");
+        ticksGroup.appendChild(topLabel);
+      }});
+
+      yTicks.forEach((tickValue) => {{
+        const yPos = scaleY(tickValue);
+        ticksGroup.appendChild(createSvgLine(padding, yPos, padding - tickLength, yPos));
+        ticksGroup.appendChild(createSvgLine(width - padding, yPos, width - padding + tickLength, yPos));
+
+        const labelText = formatTick(tickValue);
+        const leftLabel = createSvgText(padding - tickLength - 6, yPos, labelText, "tick-label");
+        leftLabel.setAttribute("text-anchor", "end");
+        leftLabel.setAttribute("dominant-baseline", "middle");
+        ticksGroup.appendChild(leftLabel);
+
+        const rightLabel = createSvgText(width - padding + tickLength + 6, yPos, labelText, "tick-label");
+        rightLabel.setAttribute("text-anchor", "start");
+        rightLabel.setAttribute("dominant-baseline", "middle");
+        ticksGroup.appendChild(rightLabel);
+      }});
+
+      const xAxisLabel = createSvgText(width / 2, height - padding + 36, "UMAP 1", "axis-label");
+      xAxisLabel.setAttribute("text-anchor", "middle");
+      xAxisLabel.setAttribute("dominant-baseline", "hanging");
+      labelsGroup.appendChild(xAxisLabel);
+
+      const yAxisLabel = createSvgText(padding - 44, height / 2, "UMAP 2", "axis-label");
+      yAxisLabel.setAttribute("text-anchor", "middle");
+      yAxisLabel.setAttribute("dominant-baseline", "middle");
+      yAxisLabel.setAttribute(
+        "transform",
+        "rotate(-90 " + (padding - 44) + " " + height / 2 + ")"
+      );
+      labelsGroup.appendChild(yAxisLabel);
+
+      const legendItems = new Map();
+
       data.forEach((point) => {{
         const coordX = point && typeof point.x === "number" ? point.x : 0;
         const coordY = point && typeof point.y === "number" ? point.y : 0;
         const fillColor = point && point.color ? point.color : "#1f77b4";
+        const clusterLabel = point && point.label !== undefined ? String(point.label) : "Unknown";
+
+        if (!legendItems.has(clusterLabel)) {{
+          legendItems.set(clusterLabel, fillColor);
+        }}
+
         const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
         circle.setAttribute("cx", scaleX(coordX));
         circle.setAttribute("cy", scaleY(coordY));
@@ -189,8 +366,32 @@ def build_umap_hover_html(
         circle.addEventListener("mousemove", moveTooltip);
         circle.addEventListener("mouseleave", hideTooltip);
 
-        svg.appendChild(circle);
+        pointsGroup.appendChild(circle);
       }});
+
+      if (legendContainer) {{
+        legendContainer.textContent = "";
+        if (legendItems.size > 0) {{
+          legendContainer.style.display = "grid";
+          legendItems.forEach((color, label) => {{
+            const item = document.createElement("div");
+            item.setAttribute("class", "legend-item");
+
+            const swatch = document.createElement("span");
+            swatch.setAttribute("class", "legend-swatch");
+            swatch.style.backgroundColor = color;
+
+            const text = document.createElement("span");
+            text.textContent = label;
+
+            item.appendChild(swatch);
+            item.appendChild(text);
+            legendContainer.appendChild(item);
+          }});
+        }} else {{
+          legendContainer.style.display = "none";
+        }}
+      }}
     }}
 
     function scheduleRender() {{

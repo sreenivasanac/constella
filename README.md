@@ -29,6 +29,7 @@ Large collections of content — emails, bookmarks, support tickets, document ch
 - **Scalability:** Token-aware batching and parallel embedding requests for scaling to tens of thousands of content units.
 - **Determinism:** Fixed-seed K-Means ensures reproducible grouping outcomes.
 - **Model agnostic:** Works with any compatible embedding backend, including local or hosted providers.
+- **Embedding model leaderboard:** [MTEB Leaderboard](https://huggingface.co/spaces/mteb/leaderboard) for evaluating embedding model performance.
 - **Faster labeling:** Enables rapid category assignment by labeling clusters rather than individual items.
 
 ## Features

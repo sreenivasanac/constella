@@ -21,11 +21,20 @@ from constella.embeddings.base import EmbeddingProvider
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
+
+# https://fireworks.ai/docs/guides/querying-embeddings-models
 DEFAULT_FIREWORKS_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 DEFAULT_FIREWORKS_API_BASE = "https://api.fireworks.ai/inference/v1"
 
 DEFAULT_MAX_TOKENS_PER_BATCH = 290_000
 DEFAULT_CONCURRENCY = max(1, min(8, (os.cpu_count() or 4)))
+
+# Top Embedding models in the MTEB Leaderboard
+# https://modal.com/blog/mteb-leaderboard-article
+# https://www.reddit.com/answers/808e5ff3-01e3-42a1-963d-e9f1ee1acde2/?q=Top+10+embedding+models+on+the+MTEB+leaderboard+-+for+clustering&source=ANSWERS
+# Qwen3-Embedding-0.6B
+# Nomic-Embed-v1.5
+# text-embedding-3-small
 
 
 class LiteLLMEmbeddingBaseProvider(EmbeddingProvider):
@@ -90,8 +99,8 @@ class LiteLLMEmbeddingBaseProvider(EmbeddingProvider):
     def _ensure_credentials(self) -> None:
         raise NotImplementedError
 
-    def _embedding_kwargs(self) -> dict[str, object]:
-        kwargs: dict[str, object] = {}
+    def _embedding_kwargs(self) -> dict:
+        kwargs = {}
         if self.api_base_url:
             kwargs["api_base"] = self.api_base_url
         return kwargs
@@ -145,13 +154,15 @@ class LiteLLMEmbeddingBaseProvider(EmbeddingProvider):
     def _count_tokens(self, text: str) -> int:
         if not text:
             return 0
+        
+        # Try using count_tokens_in_string if available (Python < 3.14)
         if count_tokens_in_string and sys.version_info[:2] < (3, 14):
             return max(1, count_tokens_in_string(text))
-
+        
+        # Fallback to approximation
         approx_by_chars = math.ceil(len(text) / CHARACTERS_PER_TOKEN) if CHARACTERS_PER_TOKEN else 0
         approx_by_words = math.ceil(len(text.split()) * TOKENS_PER_WORD)
-        approximation = max(approx_by_chars, approx_by_words)
-        return max(1, approximation)
+        return max(1, max(approx_by_chars, approx_by_words))
 
 
 class LiteLLMEmbeddingOpenAIProvider(LiteLLMEmbeddingBaseProvider):
@@ -169,12 +180,13 @@ class LiteLLMEmbeddingOpenAIProvider(LiteLLMEmbeddingBaseProvider):
         if not os.environ.get("OPENAI_API_KEY"):
             raise RuntimeError("OPENAI_API_KEY must be set for LiteLLM OpenAI embedding provider.")
 
-    def _embedding_kwargs(self) -> dict[str, object]:
+    def _embedding_kwargs(self) -> dict:
         kwargs = super()._embedding_kwargs()
         kwargs["api_key"] = os.environ["OPENAI_API_KEY"]
         return kwargs
 
 
+# https://fireworks.ai/docs/guides/querying-embeddings-models
 class LiteLLMEmbeddingFireworksProvider(LiteLLMEmbeddingBaseProvider):
     def __init__(
         self,
@@ -190,7 +202,7 @@ class LiteLLMEmbeddingFireworksProvider(LiteLLMEmbeddingBaseProvider):
         if not (os.environ.get("FIREWORKS_AI_API_KEY") or os.environ.get("FIREWORKS_API_KEY")):
             raise RuntimeError("Set FIREWORKS_AI_API_KEY or FIREWORKS_API_KEY before running this provider.")
 
-    def _embedding_kwargs(self) -> dict[str, object]:
+    def _embedding_kwargs(self) -> dict:
         kwargs = super()._embedding_kwargs()
         api_key = os.environ.get("FIREWORKS_AI_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
         kwargs["api_key"] = api_key

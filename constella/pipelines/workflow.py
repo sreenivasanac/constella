@@ -10,8 +10,7 @@ import numpy as np
 
 from constella.config.schemas import ClusteringConfig, VisualizationConfig
 from constella.data.models import ClusterAssignment, ContentUnit
-from constella.embeddings.base import EmbeddingProvider
-from constella.embeddings.adapters import LiteLLMEmbeddingFireworksProvider
+from constella.embeddings.adapters import LiteLLMEmbeddingFireworksProvider, LiteLLMEmbeddingOpenAIProvider
 from constella.visualization.umap import project_embeddings, save_umap_plot
 from constella.clustering.kmeans import run_kmeans
 
