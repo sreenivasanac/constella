@@ -1,56 +1,63 @@
-# Constella v0.1
+# Constella
 
-Constella is a library for auto-grouping for labelling content units like bookmarks, emails, files, images. It uses K-means clustering.
+Constella is a token-efficient auto-grouping and optional auto-labelling library for large text collections (emails, support tickets, bookmarks, document snippets, image captions). It couples scalable embeddings with deterministic clustering so that only a handful of representative texts ever reach an LLM.
 
-Constella (short for "Constellation") captures the goal of deriving semantic meaning by visualizing fragment points that lie in spatial proximity.
+## Motivation
 
-## Problem
+Processing tens of thousands of content units for auto-grouping and auto-labeling directly with an LLM quickly becomes cost prohibitive and yields poor quality results at long context windows. Constella avoids that trap by: (1) embedding every text with a provider-agnostic interface, (2) grouping items with deterministic K-Means, and (3) sampling only the most informative representatives for optional downstream labelling or analyst review.
 
-Large collections of content — emails, bookmarks, support tickets, document chunks—are costly to auto-organize with direct LLM calls due to token limits and degraded accuracy at long contexts. Constella first groups semantically similar content units through vector embeddings and deterministic clustering, then enables lightweight LLM labeling only on representative samples.
+## Key Capabilities
 
-## Approach
+- **Token-aware embedding pipeline:** LiteLLM-backed providers for Fireworks (default) and OpenAI automatically batch requests, cap per-batch tokens, and run concurrently to maximize throughput while respecting provider limits.
+- **Deterministic clustering:** A dataclass-driven `ClusteringConfig` feeds multi-metric model selection (silhouette, elbow, Davies–Bouldin) before running K-Means with a fixed seed, producing reproducible clusters and inertia diagnostics.
+- **Rich diagnostics:** Every `ClusterAssignment` snapshot contains selected `n_clusters`, centroids, inertia, and optional silhouette scores for auditability.
+- **Visualization tooling:** UMAP helpers generate publication-ready PNG plots and companion interactive HTML scatter views with hover tooltips, making manual inspection of clusters fast even in headless environments.
+- **Composable data models:** Lightweight `ContentUnit`, `EmbeddingVector`, and `ClusterAssignment` dataclasses provide a typed interface that works equally well with raw strings or pre-wrapped metadata objects.
 
-1. Generate semantic embeddings for each content unit via a chosen embedding provider.
-2. Cluster embeddings with deterministic K-Means, automatically evaluating candidate cluster counts with silhouette, elbow, and Davies-Bouldin scoring.
-3. Surface cluster representatives near centroids to summarize groups and support optional downstream LLM labeling or analyst review.
-4. Return assignments, centers, metrics, and visualization-ready projections for integration into downstream workflows.
+## Architecture at a Glance
 
-## Example Use Cases
+- `constella.embeddings.adapters` — LiteLLM providers for Fireworks and OpenAI with concurrency, token-count heuristics, and configurable API bases.
+- `constella.clustering.kmeans` — K-Means runner with candidate search, metric scoring, and fallbacks for numerically unstable cases.
+- `constella.visualization.umap` — UMAP projection plus static and interactive plotting utilities.
+- `constella.pipelines.workflow.cluster_texts` — End-to-end orchestrator that normalizes inputs, generates embeddings, runs clustering, and optionally persists visualizations.
+- `constella.config.schemas` / `constella.data.models` — Frozen dataclasses that capture reproducible configuration and output artefacts.
 
-- Auto-organizing large bookmark libraries into topical folders.
-- Triage and routing of email or message streams by theme before prioritization.
-- Auto-labeling document repositories or knowledge bases by semantic topic.
-- Customer feedback analysis that groups similar reviews or support tickets to expose recurring issues.
-- Topic discovery across news articles, research abstracts, or product reviews.
+## Workflow
+
+1. Pass a list of raw strings or `ContentUnit` objects into `cluster_texts` with an optional `ClusteringConfig` and `VisualizationConfig`.
+2. The Fireworks provider (or a configured alternative) embeds the texts using LiteLLM with CPU-bound batching and token budgeting.
+3. Candidate cluster sizes are evaluated with silhouette, elbow, and Davies–Bouldin heuristics before selecting the final `k`.
+4. A seeded K-Means run produces assignments, cluster centres, and inertia diagnostics which are returned as a `ClusterAssignment` snapshot.
+5. If visualization is enabled, embeddings are projected with UMAP and saved to disk as PNG and/or interactive HTML artefacts for downstream review.
 
 ## Advantages
 
-- **Token efficiency:** Limits expensive LLM calls to small representative subsets instead of entire corpora.
-- **Scalability:** Token-aware batching and parallel embedding requests for scaling to tens of thousands of content units.
-- **Determinism:** Fixed-seed K-Means ensures reproducible grouping outcomes.
-- **Model agnostic:** Works with any compatible embedding backend, including local or hosted providers.
-- **Embedding model leaderboard:** [MTEB Leaderboard](https://huggingface.co/spaces/mteb/leaderboard) for evaluating embedding model performance.
-- **Faster labeling:** Enables rapid category assignment by labeling clusters rather than individual items.
+- **Token efficiency:** Only cluster representatives need to be sent to an LLM, compressing label costs by orders of magnitude for large corpora.
+- **Scalability:** Batch-friendly embedding requests and optional concurrency keep throughput high even for 10k+ documents.
+- **Reproducibility:** Frozen configs and seeded algorithms make it easy to compare runs and debug drift.
+- **Model agnosticism:** Any LiteLLM-compatible embedding backend can be registered without altering the pipeline.
+- **Analyst-friendly outputs:** Static and interactive plots, plus structured assignment objects, integrate cleanly with dashboards or notebooks.
 
-## Features
+## Example Use Cases
 
-- Dataclass-based configuration for clustering and optional visualization.
-- LiteLLM adapter targeting OpenAI `text-embedding-3-small` embeddings (requires `OPENAI_API_KEY`) with concurrency-aware, token-limited batching.
-- Deterministic K-Means clustering with automatic cluster count selection (silhouette, elbow, and Davies-Bouldin metrics).
-- UMAP projection helpers that generate static plots and hoverable HTML artifacts without display requirements.
-- Workflow entry point `cluster_texts` coordinating embeddings, clustering, and visualization, returning both assignments and raw embeddings for downstream analysis.
+- Organising bookmark collections into topic folders before syncing back into productivity tools.
+- Email or chat triage that groups messages by intent ahead of routing or prioritisation.
+- Labelling document repositories, research papers, or knowledge bases by discovered themes.
+- Surfacing recurring customer feedback issues by clustering support tickets or product reviews.
+- Topic discovery inside news archives or competitive intelligence datasets.
 
 ## Getting Started
 
-Install the package in editable mode:
-
-To enable embeddings through OpenAI embeddings endpoint using LiteLLM, please provide OpenAI API Key.
 ```bash
 pip install -e .
-export OPENAI_API_KEY="sk-your-key"
+
+# Choose one of the supported providers
+export FIREWORKS_AI_API_KEY="your-fireworks-key"
+# or
+export OPENAI_API_KEY="sk-your-openai-key"
 ```
 
-Run the test suite:
+To run the tests locally:
 
 ```bash
 .venv/bin/python -m pip install -e .[test]
@@ -60,14 +67,16 @@ Run the test suite:
 ## Usage
 
 ```python
+from pathlib import Path
+
 from constella.config.schemas import ClusteringConfig, VisualizationConfig
 from constella.pipelines.workflow import cluster_texts
 
 texts = ["First document", "Second document", "Third document"]
 config = ClusteringConfig(seed=8, fallback_n_clusters=2)
-viz = VisualizationConfig(output_path="/tmp/umap.png", random_state=8)
+viz = VisualizationConfig(output_path=Path("/tmp/umap.png"), random_state=8)
 
 assignment, artifacts, embeddings = cluster_texts(texts, config, viz)
 ```
 
-The returned `assignment` includes cluster centers, inertia, and an optional silhouette score snapshot for auditing, while `artifacts` contains paths to generated visualizations (static PNGs or interactive HTML). The raw `embeddings` array can be reused for downstream analytics or persistence.
+`assignment` captures cluster memberships, centroids, inertia, and any computed silhouette score, while `artifacts` contains the generated plot locations (PNG/HTML). The raw `embeddings` list can be cached or fed into downstream analytics, persistence layers, or labelling workflows.

@@ -60,35 +60,47 @@ class LiteLLMEmbeddingBaseProvider(EmbeddingProvider):
         if len(tokenized_batches) == 1:
             return self._embed_batch(tokenized_batches[0][1])
 
-        async def _run_batches() -> List[List[List[float]]]:
-            max_workers = min(self._max_concurrency, len(tokenized_batches)) or 1
-            loop = asyncio.get_running_loop()
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                tasks = [
-                    loop.run_in_executor(executor, self._embed_batch, batch_texts)
-                    for _, batch_texts in tokenized_batches
-                ]
-                return await asyncio.gather(*tasks)
+        batch_results = self._process_batches_concurrently(tokenized_batches)
+        return self._merge_batch_results(tokenized_batches, batch_results)
 
+    async def _run_batches_async(self, tokenized_batches: List[Tuple[int, List[str]]]) -> List[List[List[float]]]:
+        max_workers = min(self._max_concurrency, len(tokenized_batches)) or 1
+        loop = asyncio.get_running_loop()
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            tasks = [
+                loop.run_in_executor(executor, self._embed_batch, batch_texts)
+                for _, batch_texts in tokenized_batches
+            ]
+            return await asyncio.gather(*tasks)
+
+    def _process_batches_concurrently(self, tokenized_batches: List[Tuple[int, List[str]]]) -> List[List[List[float]]]:
         try:
             try:
-                batch_results = asyncio.run(_run_batches())
+                return asyncio.run(self._run_batches_async(tokenized_batches))
             except RuntimeError as exc:
                 if "running event loop" in str(exc).lower():
-                    loop = asyncio.new_event_loop()
-                    try:
-                        asyncio.set_event_loop(loop)
-                        batch_results = loop.run_until_complete(_run_batches())
-                    finally:
-                        loop.run_until_complete(loop.shutdown_asyncgens())
-                        asyncio.set_event_loop(None)
-                        loop.close()
+                    return self._run_with_new_event_loop(tokenized_batches)
                 else:  # pragma: no cover - unexpected runtime errors
                     raise
         except Exception as exc:  # pragma: no cover - upstream errors vary
             LOGGER.error("Embedding request failed: %s", exc)
             raise
 
+    def _run_with_new_event_loop(self, tokenized_batches: List[Tuple[int, List[str]]]) -> List[List[List[float]]]:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(self._run_batches_async(tokenized_batches))
+        finally:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def _merge_batch_results(
+        self,
+        tokenized_batches: List[Tuple[int, List[str]]],
+        batch_results: List[List[List[float]]]
+    ) -> List[List[float]]:
         ordered_embeddings: List[List[float]] = []
         for (_, batch_texts), batch_embeddings in zip(tokenized_batches, batch_results):
             if len(batch_texts) != len(batch_embeddings):  # pragma: no cover - upstream mismatch
