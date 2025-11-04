@@ -193,6 +193,9 @@ def create_umap_plot_html(
 
     data_script_path = target_path.with_name(f"{target_path.stem}_data.js")
 
+    preview_points = points[: min(len(points), 5)]
+    preview_json = json.dumps(preview_points, ensure_ascii=False).replace("</", "<\\/")
+
     html_content = build_umap_hover_html(
         data_script_path=data_script_path.name,
         title_json=title_json,
@@ -202,6 +205,7 @@ def create_umap_plot_html(
         x_max=x_max,
         y_min=y_min,
         y_max=y_max,
+        preview_json=preview_json,
     )
 
     data_script = (
