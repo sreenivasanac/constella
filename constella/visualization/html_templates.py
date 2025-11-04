@@ -13,12 +13,14 @@ def build_umap_hover_html(
     x_max: float,
     y_min: float,
     y_max: float,
+    preview_json: str,
 ) -> str:
     """Return an HTML document embedding an interactive hoverable UMAP scatter."""
 
-    script_include = ""
+    d3_include = "  <script src=\"https://cdn.jsdelivr.net/npm/d3@7\"></script>\n"
+    script_include = d3_include
     if data_script_path:
-        script_include = f"  <script src=\"{data_script_path}\" defer></script>\n"
+        script_include += f"  <script src=\"{data_script_path}\" defer></script>\n"
 
     return f"""<!DOCTYPE html>
 <html lang=\"en\">
@@ -49,13 +51,14 @@ def build_umap_hover_html(
       border-radius: 6px;
       box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
     }}
-    .axes line,
-    .ticks line {{
+    .axis path,
+    .axis line {{
       stroke: #4b5563;
       stroke-width: 1;
       pointer-events: none;
+      fill: none;
     }}
-    .ticks text {{
+    .axis text {{
       fill: #1f2937;
       font-size: 0.7rem;
     }}
@@ -130,6 +133,7 @@ def build_umap_hover_html(
     <div id=\"tooltip\" class=\"tooltip\"></div>
     <div id="legend" class="legend" aria-label="Cluster color mapping"></div>
   </div>
+  <script type="application/json" id="umap-data-preview">{preview_json}</script>
 {script_include}  <script>
     const DATA_READY_EVENT = "umap-data-ready";
     const pageTitle = {title_json};
@@ -141,12 +145,17 @@ def build_umap_hover_html(
     const yMin = {y_min};
     const yMax = {y_max};
 
-    const svg = document.getElementById("umap-plot");
+    const svgElement = document.getElementById("umap-plot");
     const tooltip = document.getElementById("tooltip");
     const legendContainer = document.getElementById("legend");
 
-    svg.setAttribute("width", width);
-    svg.setAttribute("height", height);
+    const svg = d3
+      .select(svgElement)
+      .attr("width", width)
+      .attr("height", height)
+      .attr("viewBox", "0 0 {width} {height}")
+      .attr("role", "img")
+      .attr("aria-labelledby", "plot-title");
 
     let plotInitialized = false;
 
@@ -157,64 +166,24 @@ def build_umap_hover_html(
       return null;
     }}
 
-    function scaleX(value) {{
-      if (xMax - xMin === 0) {{
-        return width / 2;
-      }}
-      return padding + ((value - xMin) / (xMax - xMin)) * (width - padding * 2);
-    }}
-
-    function scaleY(value) {{
-      if (yMax - yMin === 0) {{
-        return height / 2;
-      }}
-      return height - padding - ((value - yMin) / (yMax - yMin)) * (height - padding * 2);
-    }}
-
-    function generateTicks(min, max, steps = 5) {{
-      if (!Number.isFinite(min) || !Number.isFinite(max) || steps <= 0) {{
-        return [];
-      }}
-      if (min === max) {{
-        return [min];
-      }}
-      const increment = (max - min) / steps;
-      const ticks = [];
-      for (let i = 0; i <= steps; i += 1) {{
-        ticks.push(min + increment * i);
-      }}
-      return ticks;
-    }}
-
-    function createSvgLine(x1, y1, x2, y2, className) {{
-      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-      line.setAttribute("x1", x1);
-      line.setAttribute("y1", y1);
-      line.setAttribute("x2", x2);
-      line.setAttribute("y2", y2);
-      if (className) {{
-        line.setAttribute("class", className);
-      }}
-      return line;
-    }}
-
-    function createSvgText(x, y, textContent, className) {{
-      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      text.setAttribute("x", x);
-      text.setAttribute("y", y);
-      text.textContent = textContent;
-      if (className) {{
-        text.setAttribute("class", className);
-      }}
-      return text;
-    }}
-
     function formatTick(value) {{
       if (!Number.isFinite(value)) {{
         return "";
       }}
-      const fixed = value.toFixed(2);
-      return fixed === "-0.00" ? "0.00" : fixed;
+      const formatted = d3.format(".2f")(value);
+      return formatted === "-0.00" ? "0.00" : formatted;
+    }}
+
+    function normalizeDomain(min, max) {{
+      if (!Number.isFinite(min) || !Number.isFinite(max)) {{
+        return [0, 1];
+      }}
+      if (min === max) {{
+        const base = Math.abs(min);
+        const delta = base > 1 ? base * 0.01 : 1;
+        return [min - delta, max + delta];
+      }}
+      return [min, max];
     }}
 
     function showTooltip(evt, point) {{
@@ -263,133 +232,155 @@ def build_umap_hover_html(
 
       plotInitialized = true;
       document.getElementById("plot-title").textContent = pageTitle;
-      svg.textContent = "";
+      svg.selectAll("*").remove();
 
-      const pointsGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      pointsGroup.setAttribute("class", "points");
-      const axesGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      axesGroup.setAttribute("class", "axes");
-      const ticksGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      ticksGroup.setAttribute("class", "ticks");
-      const labelsGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      labelsGroup.setAttribute("class", "axis-labels");
+      const [xDomainMin, xDomainMax] = normalizeDomain(xMin, xMax);
+      const [yDomainMin, yDomainMax] = normalizeDomain(yMin, yMax);
 
-      svg.appendChild(pointsGroup);
-      svg.appendChild(axesGroup);
-      svg.appendChild(ticksGroup);
-      svg.appendChild(labelsGroup);
+      const xScale = d3
+        .scaleLinear()
+        .domain([xDomainMin, xDomainMax])
+        .nice()
+        .range([padding, width - padding]);
 
-      const axes = [
-        {{ x1: padding, y1: height - padding, x2: width - padding, y2: height - padding }},
-        {{ x1: padding, y1: padding, x2: width - padding, y2: padding }},
-        {{ x1: padding, y1: padding, x2: padding, y2: height - padding }},
-        {{ x1: width - padding, y1: padding, x2: width - padding, y2: height - padding }},
-      ];
+      const yScale = d3
+        .scaleLinear()
+        .domain([yDomainMin, yDomainMax])
+        .nice()
+        .range([height - padding, padding]);
 
-      axes.forEach((coords) => {{
-        axesGroup.appendChild(createSvgLine(coords.x1, coords.y1, coords.x2, coords.y2));
-      }});
+      const tickCount = 5;
+      const axisBottom = d3
+        .axisBottom(xScale)
+        .ticks(tickCount)
+        .tickFormat(formatTick)
+        .tickSizeInner(8)
+        .tickSizeOuter(0);
+      const axisTop = d3
+        .axisTop(xScale)
+        .ticks(tickCount)
+        .tickFormat(formatTick)
+        .tickSizeInner(8)
+        .tickSizeOuter(0);
+      const axisLeft = d3
+        .axisLeft(yScale)
+        .ticks(tickCount)
+        .tickFormat(formatTick)
+        .tickSizeInner(8)
+        .tickSizeOuter(0);
+      const axisRight = d3
+        .axisRight(yScale)
+        .ticks(tickCount)
+        .tickFormat(formatTick)
+        .tickSizeInner(8)
+        .tickSizeOuter(0);
 
-      const xTicks = generateTicks(xMin, xMax, 5);
-      const yTicks = generateTicks(yMin, yMax, 5);
-      const tickLength = 8;
+      svg
+        .append("g")
+        .attr("class", "axis axis-bottom")
+        .attr("transform", `translate(0,${{height - padding}})`)
+        .call(axisBottom);
 
-      xTicks.forEach((tickValue) => {{
-        const xPos = scaleX(tickValue);
-        ticksGroup.appendChild(createSvgLine(xPos, height - padding, xPos, height - padding + tickLength));
-        ticksGroup.appendChild(createSvgLine(xPos, padding, xPos, padding - tickLength));
+      svg
+        .append("g")
+        .attr("class", "axis axis-top")
+        .attr("transform", `translate(0,${{padding}})`)
+        .call(axisTop);
 
-        const labelText = formatTick(tickValue);
-        const bottomLabel = createSvgText(xPos, height - padding + tickLength + 10, labelText, "tick-label");
-        bottomLabel.setAttribute("text-anchor", "middle");
-        bottomLabel.setAttribute("dominant-baseline", "hanging");
-        ticksGroup.appendChild(bottomLabel);
+      svg
+        .append("g")
+        .attr("class", "axis axis-left")
+        .attr("transform", `translate(${{padding}},0)`)
+        .call(axisLeft);
 
-        const topLabel = createSvgText(xPos, padding - tickLength - 4, labelText, "tick-label");
-        topLabel.setAttribute("text-anchor", "middle");
-        topLabel.setAttribute("dominant-baseline", "baseline");
-        ticksGroup.appendChild(topLabel);
-      }});
+      svg
+        .append("g")
+        .attr("class", "axis axis-right")
+        .attr("transform", `translate(${{width - padding}},0)`)
+        .call(axisRight);
 
-      yTicks.forEach((tickValue) => {{
-        const yPos = scaleY(tickValue);
-        ticksGroup.appendChild(createSvgLine(padding, yPos, padding - tickLength, yPos));
-        ticksGroup.appendChild(createSvgLine(width - padding, yPos, width - padding + tickLength, yPos));
+      svg
+        .append("text")
+        .attr("class", "axis-label")
+        .attr("x", width / 2)
+        .attr("y", height - padding + 36)
+        .attr("text-anchor", "middle")
+        .attr("dominant-baseline", "hanging")
+        .text("UMAP 1");
 
-        const labelText = formatTick(tickValue);
-        const leftLabel = createSvgText(padding - tickLength - 6, yPos, labelText, "tick-label");
-        leftLabel.setAttribute("text-anchor", "end");
-        leftLabel.setAttribute("dominant-baseline", "middle");
-        ticksGroup.appendChild(leftLabel);
+      svg
+        .append("text")
+        .attr("class", "axis-label")
+        .attr("x", padding - 44)
+        .attr("y", height / 2)
+        .attr("text-anchor", "middle")
+        .attr("dominant-baseline", "middle")
+        .attr("transform", `rotate(-90 ${{padding - 44}} ${{height / 2}})`)
+        .text("UMAP 2");
 
-        const rightLabel = createSvgText(width - padding + tickLength + 6, yPos, labelText, "tick-label");
-        rightLabel.setAttribute("text-anchor", "start");
-        rightLabel.setAttribute("dominant-baseline", "middle");
-        ticksGroup.appendChild(rightLabel);
-      }});
-
-      const xAxisLabel = createSvgText(width / 2, height - padding + 36, "UMAP 1", "axis-label");
-      xAxisLabel.setAttribute("text-anchor", "middle");
-      xAxisLabel.setAttribute("dominant-baseline", "hanging");
-      labelsGroup.appendChild(xAxisLabel);
-
-      const yAxisLabel = createSvgText(padding - 44, height / 2, "UMAP 2", "axis-label");
-      yAxisLabel.setAttribute("text-anchor", "middle");
-      yAxisLabel.setAttribute("dominant-baseline", "middle");
-      yAxisLabel.setAttribute(
-        "transform",
-        "rotate(-90 " + (padding - 44) + " " + height / 2 + ")"
+      const legendItems = Array.from(
+        data.reduce((acc, point) => {{
+          const label = point && point.label !== undefined ? String(point.label) : "Unknown";
+          if (!acc.has(label)) {{
+            const color = point && point.color ? point.color : "#1f77b4";
+            acc.set(label, color);
+          }}
+          return acc;
+        }}, new Map())
       );
-      labelsGroup.appendChild(yAxisLabel);
 
-      const legendItems = new Map();
+      const pointGroup = svg.append("g").attr("class", "points");
 
-      data.forEach((point) => {{
-        const coordX = point && typeof point.x === "number" ? point.x : 0;
-        const coordY = point && typeof point.y === "number" ? point.y : 0;
-        const fillColor = point && point.color ? point.color : "#1f77b4";
-        const clusterLabel = point && point.label !== undefined ? String(point.label) : "Unknown";
-
-        if (!legendItems.has(clusterLabel)) {{
-          legendItems.set(clusterLabel, fillColor);
-        }}
-
-        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        circle.setAttribute("cx", scaleX(coordX));
-        circle.setAttribute("cy", scaleY(coordY));
-        circle.setAttribute("r", 5);
-        circle.setAttribute("fill", fillColor);
-        circle.setAttribute("stroke", "#1f2937");
-        circle.setAttribute("stroke-width", 0.5);
-
-        circle.addEventListener("mouseenter", (event) => showTooltip(event, point));
-        circle.addEventListener("mousemove", moveTooltip);
-        circle.addEventListener("mouseleave", hideTooltip);
-
-        pointsGroup.appendChild(circle);
-      }});
+      pointGroup
+        .selectAll("circle")
+        .data(data)
+        .join("circle")
+        .attr("cx", (point) => {{
+          const coord = point && typeof point.x === "number" ? point.x : 0;
+          return xScale(coord);
+        }})
+        .attr("cy", (point) => {{
+          const coord = point && typeof point.y === "number" ? point.y : 0;
+          return yScale(coord);
+        }})
+        .attr("r", 5)
+        .attr("fill", (point) => (point && point.color ? point.color : "#1f77b4"))
+        .attr("stroke", "#1f2937")
+        .attr("stroke-width", 0.5)
+        .on("mouseenter", (event, point) => showTooltip(event, point))
+        .on("mousemove", (event) => moveTooltip(event))
+        .on("mouseleave", hideTooltip);
 
       if (legendContainer) {{
-        legendContainer.textContent = "";
-        if (legendItems.size > 0) {{
-          legendContainer.style.display = "grid";
-          legendItems.forEach((color, label) => {{
-            const item = document.createElement("div");
-            item.setAttribute("class", "legend-item");
+        const legend = d3.select(legendContainer);
+        if (legendItems.length > 0) {{
+          legend.style("display", "grid");
+          const legendSelection = legend
+            .selectAll(".legend-item")
+            .data(legendItems, (entry) => entry[0]);
 
-            const swatch = document.createElement("span");
-            swatch.setAttribute("class", "legend-swatch");
-            swatch.style.backgroundColor = color;
+          const legendEnter = legendSelection
+            .enter()
+            .append("div")
+            .attr("class", "legend-item");
 
-            const text = document.createElement("span");
-            text.textContent = label;
+          legendEnter.append("span").attr("class", "legend-swatch");
+          legendEnter.append("span").attr("class", "legend-label");
 
-            item.appendChild(swatch);
-            item.appendChild(text);
-            legendContainer.appendChild(item);
-          }});
+          legendSelection
+            .merge(legendEnter)
+            .each(function ([label, color]) {{
+              const selection = d3.select(this);
+              selection
+                .select(".legend-swatch")
+                .style("background-color", color || "#1f77b4");
+              selection.select(".legend-label").text(label);
+            }});
+
+          legendSelection.exit().remove();
         }} else {{
-          legendContainer.style.display = "none";
+          legend.style("display", "none");
+          legend.selectAll("*").remove();
         }}
       }}
     }}
