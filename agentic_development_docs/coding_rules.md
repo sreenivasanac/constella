@@ -5,6 +5,7 @@
   - Take your time to think, no hurry.
   - If there are TODOs, add as comment in the same code file while you are implementing them.
   - Keep the code simple as much as possible. avoid handling extra cases that are far away from the expectation instruction. If handling those extra cases are very necessary and important, then you can handle them.
+  - whenever running python or related scripts (like pytest, pip) - use uv instead of directly running.
 
 ## Development communication
   - If you have any question about the implementation, which is an important one, then you can stop and ask me before continuing the implementation.

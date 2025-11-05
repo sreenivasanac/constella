@@ -13,14 +13,13 @@ import logging
 import os
 from dataclasses import asdict
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import psycopg
 
 from constella.config.schemas import ClusteringConfig, VisualizationConfig
-from constella.data.models import ContentUnit
-from constella.pipelines.workflow import cluster_texts
-from constella.visualization.umap import create_umap_plot_html, project_embeddings, save_umap_plot
+from constella.data.models import ContentUnit, ContentUnitCollection
+from constella.pipelines.workflow import run_pipeline as execute_workflow
 
 
 LOGGER = logging.getLogger("quora_analysis_pipeline")
@@ -55,7 +54,7 @@ def fetch_content_units(conn: psycopg.Connection, limit: Optional[int] = None) -
 
     LOGGER.info("Executing query: %s", query)
 
-    texts: List[ContentUnit] = []
+    units: List[ContentUnit] = []
     with conn.cursor() as cur:
         if limit is None:
             cur.execute(query)
@@ -65,16 +64,29 @@ def fetch_content_units(conn: psycopg.Connection, limit: Optional[int] = None) -
 
     for row in rows:
         identifier = f"answer_{row[0]}"
-        text_parts = [
-            f"Question: {row[3]}" if row[3] else "",
-            f"Answered URL: {row[2]}" if row[2] else "",
-            f"Answer: {row[4]}" if row[4] else "",
-        ]
-        text = "\n".join(part for part in text_parts if part)
-        texts.append(ContentUnit(identifier=identifier, text=text))
+        question_url = row[1]
+        answered_question_url = row[2]
+        question_text = row[3]
+        answer_content = row[4] or ""
 
-    LOGGER.info("Fetched %d rows", len(texts))
-    return texts
+        units.append(
+            ContentUnit(
+                identifier=identifier,
+                text=answer_content,
+                title=question_text,
+                name=question_url,
+                path=answered_question_url,
+                size=f"{len(answer_content)} characters" if answer_content else None,
+                metadata1={
+                    "question_url": question_url,
+                    "answered_question_url": answered_question_url,
+                },
+                metadata2={"question_text": question_text} if question_text else {},
+            )
+        )
+
+    LOGGER.info("Fetched %d rows", len(units))
+    return units
 
 
 def ensure_output_dir(path: Path) -> Path:
@@ -82,27 +94,38 @@ def ensure_output_dir(path: Path) -> Path:
     return path
 
 
-def serialize_assignments(output_dir: Path, assignment, units: Sequence[ContentUnit]) -> Path:
-    snapshot = asdict(assignment.config_snapshot)
+def serialize_assignments(
+    output_dir: Path,
+    collection: ContentUnitCollection,
+    metrics: Dict[str, object],
+    config: ClusteringConfig,
+) -> Path:
     payload = {
         "assignments": {
-            unit.identifier: cluster for unit, cluster in zip(units, assignment.assignments)
+            unit.identifier: int(unit.cluster_id)
+            for unit in collection
+            if unit.cluster_id is not None
         },
         "metadata": {
-            "silhouette_score": assignment.silhouette_score,
-            "inertia": assignment.inertia,
-            "centers": assignment.centers,
-            "config_snapshot": snapshot,
+            "silhouette_score": metrics.get("silhouette_score"),
+            "inertia": metrics.get("inertia"),
+            "n_clusters": metrics.get("n_clusters"),
+            "centers": metrics.get("centers"),
+            "config_snapshot": asdict(config),
         },
     }
 
     output_path = output_dir / "clusters.json"
-    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    output_path.write_text(_json_dumps(payload), encoding="utf-8")
     LOGGER.info("Saved cluster assignments to %s", output_path)
     return output_path
 
 
-def run_pipeline(args: argparse.Namespace) -> None:
+def _json_dumps(payload: Dict[str, object]) -> str:
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def run_cli_pipeline(args: argparse.Namespace) -> None:
     logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(message)s")
 
     if not args.database_url:
@@ -120,41 +143,30 @@ def run_pipeline(args: argparse.Namespace) -> None:
     LOGGER.info("Running Constella clustering pipeline")
     clustering_config = ClusteringConfig()
     png_path = output_dir / f"{args.umap_filename}.png"
-    html_path = output_dir / f"{args.umap_filename}.html"
-
+    viz_config = VisualizationConfig(output_path=png_path)
 
     LOGGER.info("Running clustering workflow")
-    assignment, _, embeddings = cluster_texts(
-        units,
-        clustering_config=clustering_config,
-        visualization_config=None
+    collection = ContentUnitCollection(units)
+
+    collection, artifacts, metrics = execute_workflow(
+        collection,
+        steps=("embed", "cluster", "visualize"),
+        configs={
+            "cluster": clustering_config,
+            "visualize": viz_config,
+        },
     )
 
-    serialize_assignments(output_dir, assignment, units)
+    serialize_assignments(output_dir, collection, metrics, clustering_config)
 
-    visualization_config = VisualizationConfig(output_path=png_path)
-    projection = project_embeddings(embeddings, visualization_config)
-
-    save_umap_plot(
-        projection,
-        assignment.assignments,
-        visualization_config,
-        title="Quora Answer Clusters",
-    )
-
-    create_umap_plot_html(
-        projection,
-        assignment.assignments,
-        visualization_config,
-        texts_or_units=units,
-        title="Quora Answer Clusters",
-        output_path=html_path
-    )
+    if artifacts:
+        for artifact in artifacts:
+            LOGGER.info("Generated artifact: %s", artifact)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
-    run_pipeline(args)
+    run_cli_pipeline(args)
 
 
 if __name__ == "__main__":

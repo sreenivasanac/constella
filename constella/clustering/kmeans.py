@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import Dict, Iterable, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 from numpy.random import RandomState
@@ -12,7 +12,6 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import davies_bouldin_score, silhouette_score
 
 from constella.config.schemas import ClusteringConfig
-from constella.data.models import ClusterAssignment
 
 
 LOGGER = logging.getLogger(__name__)
@@ -272,8 +271,8 @@ def _select_cluster_count(vectors: np.ndarray, config: ClusteringConfig) -> int:
     return final_k
 
 
-def run_kmeans(vectors: Iterable[Sequence[float]], config: ClusteringConfig) -> ClusterAssignment:
-    """Select an appropriate cluster count, run K-Means, and return results."""
+def run_kmeans(vectors: Iterable[Sequence[float]], config: ClusteringConfig) -> Tuple[List[int], Dict[str, object]]:
+    """Select an appropriate cluster count, run K-Means, and return labels with metrics."""
 
     array = np.array(list(vectors), dtype=np.float64)
     if array.ndim != 2 or array.size == 0:
@@ -283,9 +282,9 @@ def run_kmeans(vectors: Iterable[Sequence[float]], config: ClusteringConfig) -> 
     n_clusters = min(n_clusters, len(array))
 
     try:
-        kmeans, labels = _fit_kmeans(array, n_clusters, config.seed, 'k-means++')
-    except (RuntimeWarning, FloatingPointError, Exception) as e:
-        LOGGER.error("Critical numerical error in main K-Means fitting: %s", e)
+        km, labels = _fit_kmeans(array, n_clusters, config.seed, 'k-means++')
+    except (RuntimeWarning, FloatingPointError, Exception) as exc:  # pragma: no cover - sklearn edge cases
+        LOGGER.error("Critical numerical error in main K-Means fitting: %s", exc)
         raise
 
     silhouette = _safe_silhouette_score(
@@ -296,12 +295,15 @@ def run_kmeans(vectors: Iterable[Sequence[float]], config: ClusteringConfig) -> 
         "for final clustering",
     )
 
-    LOGGER.info("Clustering completed with inertia=%s", kmeans.inertia_)
+    LOGGER.info("Clustering completed with inertia=%s", km.inertia_)
 
-    return ClusterAssignment(
-        assignments=labels.tolist(),
-        centers=kmeans.cluster_centers_.tolist(),
-        inertia=float(kmeans.inertia_),
-        silhouette_score=float(silhouette) if silhouette is not None else None,
-        config_snapshot=config,
-    )
+    metrics: Dict[str, object] = {
+        "inertia": float(km.inertia_),
+        "silhouette_score": float(silhouette) if silhouette is not None else None,
+        "n_clusters": int(n_clusters),
+        "centers": km.cluster_centers_.tolist(),
+    }
+
+    metrics["config_snapshot"] = config
+
+    return labels.tolist(), metrics

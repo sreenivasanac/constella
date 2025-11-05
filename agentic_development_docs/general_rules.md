@@ -1,4 +1,4 @@
-- Do not modify the `old_code` folder. Treat it strictly as inspiration—evaluate ideas there, but do not copy the code verbatim / as such.
+- Do not modify the `old_code` folder. Treat it strictly as inspiration—evaluseate ideas there, but do not copy the code verbatim / as such.
 
 - Avoid reading or  modifying the `used_prompts` folder. Those are used prompts, not needed now. `agentic_development_docs/used_prompts/`.
 
@@ -13,3 +13,5 @@ https://scikit-learn.org/stable/modules/generated/sklearn.cluster.KMeans.html
 - Use context7 for getting updated documentation for scikit-learn and its functions.
 the documentation for scikit-learn silhoutte score is given here:
 https://scikit-learn.org/stable/modules/generated/sklearn.metrics.silhouette_score.html
+
+- whenever running python or related scripts (like pytest, pip) - use uv instead of directly running.

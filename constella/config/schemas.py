@@ -1,4 +1,4 @@
-"""Configuration schemas for clustering and visualization workflows."""
+"""Configuration schemas for Constella workflows."""
 
 from __future__ import annotations
 
@@ -29,3 +29,10 @@ class VisualizationConfig:
     n_neighbors: int = 15
     min_dist: float = 0.1
     random_state: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class LabelingConfig:
+    """Placeholder configuration for future automatic cluster labeling."""
+
+    test_labeling_config_parameter = None
