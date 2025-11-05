@@ -21,30 +21,30 @@ def test_run_kmeans_deterministic_assignments():
     ])
 
     config = ClusteringConfig(seed=7, fallback_n_clusters=2, max_candidate_clusters=4)
-    assignment = run_kmeans(data, config)
+    labels, metrics = run_kmeans(data, config)
 
-    assert assignment.config_snapshot == config
+    assert metrics["config_snapshot"] == config
     expected_k = _select_cluster_count(data, config)
-    assert len(set(assignment.assignments)) == expected_k
-    assert assignment.silhouette_score is not None
+    assert len(set(labels)) == expected_k
+    assert metrics["silhouette_score"] is not None
 
 
 def test_run_kmeans_respects_fallback_when_insufficient_points():
     data = np.array([[0.0, 0.0], [1.0, 1.0]])
     config = ClusteringConfig(seed=1, fallback_n_clusters=2, enable_silhouette_selection=True)
-    assignment = run_kmeans(data, config)
+    labels, metrics = run_kmeans(data, config)
 
-    assert len(set(assignment.assignments)) == 2
-    assert assignment.silhouette_score is None
+    assert len(set(labels)) == 2
+    assert metrics["silhouette_score"] is None
 
 
 def test_run_kmeans_handles_single_cluster_silhouette_error():
     data = np.array([[0.0, 0.0], [0.0, 0.0]])
     config = ClusteringConfig(seed=3, fallback_n_clusters=2, enable_silhouette_selection=True)
-    assignment = run_kmeans(data, config)
+    labels, metrics = run_kmeans(data, config)
 
-    assert len(assignment.assignments) == 2
-    assert assignment.silhouette_score is None
+    assert len(labels) == 2
+    assert metrics["silhouette_score"] is None
 
 
 def test_silhouette_selection_finds_optimal_cluster_count():
@@ -62,11 +62,11 @@ def test_silhouette_selection_finds_optimal_cluster_count():
         enable_davies_bouldin_selection=False,
     )
 
-    assignment = run_kmeans(data, config)
+    labels, metrics = run_kmeans(data, config)
 
-    assert len(set(assignment.assignments)) == 3
-    assert assignment.silhouette_score is not None
-    assert assignment.silhouette_score > 0.5
+    assert len(set(labels)) == 3
+    assert metrics["silhouette_score"] is not None
+    assert metrics["silhouette_score"] > 0.5
 
 
 def test_resolve_silhouette_sample_size_adjusts_within_bounds():
@@ -101,9 +101,9 @@ def test_elbow_selection_used_when_silhouette_disabled():
         enable_davies_bouldin_selection=False,
     )
 
-    assignment = run_kmeans(data, config)
+    labels, _ = run_kmeans(data, config)
 
-    assert len(set(assignment.assignments)) == 3
+    assert len(set(labels)) == 3
 
 
 def test_combined_selection_prefers_max(monkeypatch):
@@ -145,9 +145,9 @@ def test_combined_selection_prefers_max(monkeypatch):
         enable_davies_bouldin_selection=True,
     )
 
-    assignment = run_kmeans(data, config)
+    labels, _ = run_kmeans(data, config)
 
-    assert len(set(assignment.assignments)) == 6
+    assert len(set(labels)) == 6
 
 
 def test_davies_bouldin_selection_used_when_others_disabled():
@@ -166,6 +166,6 @@ def test_davies_bouldin_selection_used_when_others_disabled():
         enable_davies_bouldin_selection=True,
     )
 
-    assignment = run_kmeans(data, config)
+    labels, _ = run_kmeans(data, config)
 
-    assert len(set(assignment.assignments)) == 3
+    assert len(set(labels)) == 3

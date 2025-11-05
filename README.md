@@ -11,8 +11,8 @@ Processing tens of thousands of content units for auto-grouping and auto-labelin
 - **Token-aware embedding pipeline:** LiteLLM-backed providers for Fireworks (default) and OpenAI automatically batch requests, cap per-batch tokens, and run concurrently to maximize throughput while respecting provider limits.
 - **Deterministic clustering:** A dataclass-driven `ClusteringConfig` feeds multi-metric model selection (silhouette, elbow, Davies–Bouldin) before running K-Means with a fixed seed, producing reproducible clusters and inertia diagnostics.
 - **Rich diagnostics:** Every `ClusterAssignment` snapshot contains selected `n_clusters`, centroids, inertia, and optional silhouette scores for auditability.
-- **Visualization tooling:** UMAP helpers generate publication-ready PNG plots and companion interactive HTML scatter views with hover tooltips, making manual inspection of clusters fast even in headless environments.
-- **Composable data models:** Lightweight `ContentUnit`, `EmbeddingVector`, and `ClusterAssignment` dataclasses provide a typed interface that works equally well with raw strings or pre-wrapped metadata objects.
+- **Visualization tooling:** UMAP helpers generate publication-ready PNG plots and companion D3.js-powered interactive HTML scatter views with hover tooltips, making manual inspection of clusters fast even in headless environments.
+- **Composable data models:** Lightweight `ContentUnit`, `EmbeddingVector`, and `ClusterAssignment` dataclasses provide a typed interface.
 
 ## Architecture at a Glance
 
@@ -28,7 +28,7 @@ Processing tens of thousands of content units for auto-grouping and auto-labelin
 2. The Fireworks provider (or a configured alternative) embeds the texts using LiteLLM with CPU-bound batching and token budgeting.
 3. Candidate cluster sizes are evaluated with silhouette, elbow, and Davies–Bouldin heuristics before selecting the final `k`.
 4. A seeded K-Means run produces assignments, cluster centres, and inertia diagnostics which are returned as a `ClusterAssignment` snapshot.
-5. If visualization is enabled, embeddings are projected with UMAP and saved to disk as PNG and/or interactive HTML artefacts for downstream review.
+5. If visualization is enabled, embeddings are projected with UMAP and saved to disk as PNG and/or D3.js-based interactive HTML artefacts for downstream review.
 
 ## Advantages
 
