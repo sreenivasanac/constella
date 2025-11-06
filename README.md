@@ -73,25 +73,37 @@ from pathlib import Path
 
 from constella.config.schemas import ClusteringConfig, VisualizationConfig
 from constella.data.models import ContentUnit, ContentUnitCollection
+from constella.embeddings.adapters import LiteLLMEmbeddingFireworksProvider
 from constella.pipelines.workflow import cluster_texts
 
 units = ContentUnitCollection([
-    ContentUnit(identifier="doc_1", text="First document"),
-    ContentUnit(identifier="doc_2", text="Second document"),
-    ContentUnit(identifier="doc_3", text="Third document"),
+    ContentUnit(identifier="doc_1", text="First document", metadata1={"source": "faq"}),
+    ContentUnit(identifier="doc_2", text="Second document", metadata1={"source": "faq"}),
+    ContentUnit(identifier="doc_3", text="Third document", metadata1={"source": "faq"}),
 ])
 
 collection = cluster_texts(
     units,
-    clustering_config=ClusteringConfig(fallback_n_clusters=2, seed=8),
-    visualization_config=VisualizationConfig(output_path=Path("/tmp/umap.png"), random_state=8),
+    clustering_config=ClusteringConfig(
+        fallback_n_clusters=2,
+        silhouette_sample_size=64,
+        seed=8,
+    ),
+    visualization_config=VisualizationConfig(
+        output_path=Path("/tmp/constella/umap.png"),
+        random_state=8,
+    ),
+    embedding_provider=LiteLLMEmbeddingFireworksProvider(),
 )
 
 if collection.metrics:
-    print("Clusters:", collection.metrics.n_clusters)
-    print("Silhouette score:", collection.metrics.silhouette_score)
+    metrics = collection.metrics
+    print("Number of Clusters:", metrics.n_clusters)
+    print("Silhouette score:", metrics.silhouette_score)
 
 if collection.artifacts:
-    print("Visualization saved to %s %s", collection.artifacts.static_plot, collection.artifacts.html_plot)
+    artifacts = collection.artifacts
+    print("Static visualization:", artifacts.static_plot)
+    print("Interactive visualization:", artifacts.html_plot)
 ```
-`collection` contains cluster assignments on each `ContentUnit`, plus optional metrics and visualization artifact paths for downstream workflows.
+`collection` contains cluster assignments on each `ContentUnit`, along with an optional `ClusteringMetrics` snapshot and any generated `VisualizationArtifacts` paths.
