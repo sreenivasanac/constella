@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, MutableSequence, Sequence
-from copy import deepcopy
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
+
+from constella.config.schemas import ClusteringMetrics, VisualizationArtifacts
 
 
 @dataclass
@@ -41,6 +42,8 @@ class ContentUnitCollection(MutableSequence[ContentUnit]):
 
     def __init__(self, units: Iterable[ContentUnit]):
         self._units: List[ContentUnit] = list(units or [])
+        self._metrics: Optional[ClusteringMetrics] = None
+        self._artifacts: Optional[VisualizationArtifacts] = None
 
     # -- MutableSequence interface -------------------------------------------------
     def __getitem__(self, index: int) -> ContentUnit:
@@ -69,49 +72,65 @@ class ContentUnitCollection(MutableSequence[ContentUnit]):
         if not isinstance(unit, ContentUnit):
             raise TypeError("ContentUnitCollection elements must be ContentUnit instances")
 
-    def clone(self, *, deep: bool = False) -> "ContentUnitCollection":
-        if deep:
-            return ContentUnitCollection([deepcopy(unit) for unit in self._units])
-        return ContentUnitCollection(self._units.copy())
 
     def units(self) -> List[ContentUnit]:
         return self._units
+
+    @property
+    def metrics(self) -> Optional[ClusteringMetrics]:
+        return self._metrics
+
+    @metrics.setter
+    def metrics(self, value: Optional[ClusteringMetrics]) -> None:
+        self._metrics = value
+
+    @property
+    def artifacts(self) -> Optional[VisualizationArtifacts]:
+        return self._artifacts
+
+    @artifacts.setter
+    def artifacts(self, value: Optional[VisualizationArtifacts]) -> None:
+        self._artifacts = value
 
     def texts(self) -> List[str]:
         return self.all_texts()
 
     def all_texts(self) -> List[str]:
-        combined_texts: List[str] = []
+        def _normalize(value: Any) -> Optional[str]:
+            if isinstance(value, str):
+                stripped = value.strip()
+                return stripped or None
+            if value is not None:
+                return str(value)
+            return None
+
+        combined: List[str] = []
         for unit in self._units:
-            parts: List[str] = []
+            parts = [
+                fragment
+                for attr in ("title", "name", "text")
+                for fragment in (_normalize(getattr(unit, attr)),)
+                if fragment
+            ]
 
-            for attr in ("title", "name", "text"):
-                value = getattr(unit, attr)
-                if isinstance(value, str):
-                    stripped_value = value.strip()
-                    if stripped_value:
-                        parts.append(stripped_value)
-
-            if unit.path:
-                parts.append(unit.path)
+            path_fragment = _normalize(unit.path)
+            if path_fragment:
+                parts.append(path_fragment)
 
             for metadata in (unit.metadata1, unit.metadata2):
-                if not metadata:
-                    continue
-                for meta_value in metadata.values():
-                    if isinstance(meta_value, str):
-                        stripped_meta_value = meta_value.strip()
-                        if stripped_meta_value:
-                            parts.append(stripped_meta_value)
-                    elif meta_value is not None:
-                        parts.append(str(meta_value))
+                if metadata:
+                    parts.extend(
+                        fragment
+                        for fragment in (_normalize(val) for val in metadata.values())
+                        if fragment
+                    )
 
             if not parts:
                 parts.append(unit.identifier)
 
-            combined_texts.append("\n".join(parts))
+            combined.append("\n".join(parts))
 
-        return combined_texts
+        return combined
 
     def identifiers(self) -> List[str]:
         return [unit.identifier for unit in self._units]
@@ -129,19 +148,7 @@ class ContentUnitCollection(MutableSequence[ContentUnit]):
         return self.ensure_embeddings()
 
     def attach_embeddings(self, vectors: Iterable[Sequence[float]]) -> None:
-        iterator = iter(vectors)
-        for unit in self._units:
-            try:
-                vector = next(iterator)
-            except StopIteration as exc:  # pragma: no cover - defensive guard
-                raise ValueError("Fewer embeddings than units were provided") from exc
-            unit.set_embedding(vector)
-
-        try:
-            next(iterator)
-        except StopIteration:
-            return
-        raise ValueError("More embeddings than units were provided")
+        self._attach_sequence(vectors, ContentUnit.set_embedding, "embeddings")
 
     # -- Clustering helpers --------------------------------------------------------
     def ensure_cluster_assignments(self) -> List[int]:
@@ -156,19 +163,27 @@ class ContentUnitCollection(MutableSequence[ContentUnit]):
         return self.ensure_cluster_assignments()
 
     def attach_cluster_ids(self, cluster_ids: Iterable[int]) -> None:
-        iterator = iter(cluster_ids)
-        for unit in self._units:
-            try:
-                cid = next(iterator)
-            except StopIteration as exc:  # pragma: no cover - defensive guard
-                raise ValueError("Fewer cluster IDs than units were provided") from exc
+        def _assign(unit: ContentUnit, cid: int) -> None:
             unit.set_cluster(int(cid))
 
-        try:
-            next(iterator)
-        except StopIteration:
-            return
-        raise ValueError("More cluster IDs than units were provided")
+        self._attach_sequence(cluster_ids, _assign, "cluster IDs")
+
+    def _attach_sequence(
+        self,
+        values: Iterable[Any],
+        setter: Callable[[ContentUnit, Any], None],
+        label: str,
+    ) -> None:
+        iterator = iter(values)
+        for unit in self._units:
+            try:
+                value = next(iterator)
+            except StopIteration as exc:  # pragma: no cover - defensive guard
+                raise ValueError(f"Fewer {label} than units were provided") from exc
+            setter(unit, value)
+
+        if any(True for _ in iterator):  # pragma: no cover - defensive guard
+            raise ValueError(f"More {label} than units were provided")
 
 
 __all__ = [

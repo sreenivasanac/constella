@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 import os
-import sys
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Sequence, Tuple
+from typing import Iterable, List, Sequence, Tuple
 
 import litellm
-
-from count_tokens import count_tokens_in_string
-from count_tokens.count import CHARACTERS_PER_TOKEN, TOKENS_PER_WORD
+import tiktoken
 
 from constella.embeddings.base import EmbeddingProvider
 
@@ -57,49 +53,29 @@ class LiteLLMEmbeddingBaseProvider(EmbeddingProvider):
         self._ensure_credentials()
 
         tokenized_batches = self._build_batches(texts)
+        return self._embed_batches(tokenized_batches)
+
+    def _embed_batches(self, tokenized_batches: List[Tuple[int, List[str]]]) -> List[List[float]]:
+        if not tokenized_batches:
+            return []
+
         if len(tokenized_batches) == 1:
             return self._embed_batch(tokenized_batches[0][1])
 
-        batch_results = self._process_batches_concurrently(tokenized_batches)
-        return self._merge_batch_results(tokenized_batches, batch_results)
-
-    async def _run_batches_async(self, tokenized_batches: List[Tuple[int, List[str]]]) -> List[List[List[float]]]:
         max_workers = min(self._max_concurrency, len(tokenized_batches)) or 1
-        loop = asyncio.get_running_loop()
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            tasks = [
-                loop.run_in_executor(executor, self._embed_batch, batch_texts)
-                for _, batch_texts in tokenized_batches
-            ]
-            return await asyncio.gather(*tasks)
-
-    def _process_batches_concurrently(self, tokenized_batches: List[Tuple[int, List[str]]]) -> List[List[List[float]]]:
         try:
-            try:
-                return asyncio.run(self._run_batches_async(tokenized_batches))
-            except RuntimeError as exc:
-                if "running event loop" in str(exc).lower():
-                    return self._run_with_new_event_loop(tokenized_batches)
-                else:  # pragma: no cover - unexpected runtime errors
-                    raise
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                batch_results = list(executor.map(self._embed_batch, (batch for _, batch in tokenized_batches)))
         except Exception as exc:  # pragma: no cover - upstream errors vary
             LOGGER.error("Embedding request failed: %s", exc)
             raise
 
-    def _run_with_new_event_loop(self, tokenized_batches: List[Tuple[int, List[str]]]) -> List[List[List[float]]]:
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(self._run_batches_async(tokenized_batches))
-        finally:
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            asyncio.set_event_loop(None)
-            loop.close()
+        return self._merge_batch_results(tokenized_batches, batch_results)
 
     def _merge_batch_results(
         self,
         tokenized_batches: List[Tuple[int, List[str]]],
-        batch_results: List[List[List[float]]]
+        batch_results: Iterable[List[List[float]]]
     ) -> List[List[float]]:
         ordered_embeddings: List[List[float]] = []
         for (_, batch_texts), batch_embeddings in zip(tokenized_batches, batch_results):
@@ -167,14 +143,14 @@ class LiteLLMEmbeddingBaseProvider(EmbeddingProvider):
         if not text:
             return 0
         
-        # Try using count_tokens_in_string if available (Python < 3.14)
-        if count_tokens_in_string and sys.version_info[:2] < (3, 14):
-            return max(1, count_tokens_in_string(text))
-        
-        # Fallback to approximation
-        approx_by_chars = math.ceil(len(text) / CHARACTERS_PER_TOKEN) if CHARACTERS_PER_TOKEN else 0
-        approx_by_words = math.ceil(len(text.split()) * TOKENS_PER_WORD)
-        return max(1, max(approx_by_chars, approx_by_words))
+        try:
+            # Use tiktoken for accurate token counting
+            encoding = tiktoken.get_encoding("cl100k_base")
+            return max(1, len(encoding.encode(text)))
+        except Exception:
+            # Fallback to word-based approximation if tiktoken fails
+            # Rough estimate: 1.3 tokens per word (4/3)
+            return max(1, math.ceil(len(text.split()) * 4 / 3))
 
 
 class LiteLLMEmbeddingOpenAIProvider(LiteLLMEmbeddingBaseProvider):

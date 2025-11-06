@@ -19,9 +19,8 @@ requires-python = ">=3.11,<3.14"
     "umap-learn>=0.5.5",
     "numba>=0.62.1",
     "streamlit>=1.37",
-    "litellm>=1.39.1",
-    "count-tokens>=0.7.2",
- ]
+    "litellm>=1.79",
+]
 
 [project.optional-dependencies]
 test = [

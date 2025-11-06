@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 
-@dataclass(frozen=True)
+@dataclass
 class ClusteringConfig:
     """Settings controlling the deterministic K-Means workflow."""
 
@@ -20,7 +20,7 @@ class ClusteringConfig:
     enable_elbow_selection: bool = True
     enable_davies_bouldin_selection: bool = True
 
-@dataclass(frozen=True)
+@dataclass
 class VisualizationConfig:
     """Configuration for optional UMAP visualization generation."""
 
@@ -31,8 +31,36 @@ class VisualizationConfig:
     random_state: Optional[int] = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class LabelingConfig:
-    """Placeholder configuration for future automatic cluster labeling."""
+    """Minimal configuration for future automatic cluster labeling."""
 
-    test_labeling_config_parameter = None
+    provider: str = "fireworks"
+    max_representatives: int = 5
+    prompt_template: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ClusteringMetrics:
+    """Snapshot of clustering diagnostics captured during K-Means execution."""
+
+    n_clusters: int
+    inertia: Optional[float] = None
+    silhouette_score: Optional[float] = None
+    centers: Optional[List[List[float]]] = None
+    config_snapshot: Optional[ClusteringConfig] = None
+
+
+@dataclass
+class VisualizationArtifacts:
+    """References to visualization artifacts generated during the workflow."""
+
+    static_plot: Optional[Path] = None
+    html_plot: Optional[Path] = None
+
+    @property
+    def generated(self) -> bool:
+        return any((self.static_plot, self.html_plot))
+
+    def __bool__(self) -> bool:  # pragma: no cover - truthiness convenience
+        return self.generated
