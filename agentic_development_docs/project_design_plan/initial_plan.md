@@ -37,7 +37,7 @@ The goal is a clear, practical pipeline that reduces LLM token usage while prese
   - Embed in batches for throughput and memory efficiency for large number of inputs.
 - When clusters contain many content-units, compute optional representatives per cluster by nearest‑to‑centroid.
 - Call an external LLM on each cluster’s representatives to propose a label (Optional).
-- Output artifacts: cluster assignments, cluster centers, cluster sizes, representative indices, any LLM‑generated labels (if used).
+- Output focuses on cluster assignments and clustering diagnostics attached to each content unit collection, with optional visualization paths, representative indices, and any LLM‑generated labels (if used).
 
 ## Deliverables (API sketch, non‑binding)
 - fit_embeddings(texts, config) → clusters, centers, sizes

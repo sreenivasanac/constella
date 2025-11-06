@@ -40,10 +40,9 @@
   examples/
     notebook/            # optional notebooks (deferred beyond v0.4 if needed)
   ```
-- **Configuration surface**: YAML or dict-driven, validated via `pydantic`. Entry point functions accept typed configs to ensure reproducibility.
-- **Configuration surface**: Minimal dataclass-based configs in v0.1 (primarily clustering and visualization toggles), expanded validation via `pydantic` in v0.2.
-- **Embedding connectors**: `embeddings/adapters.py` wires LiteLLM to call OpenAI `text-embedding-3-small` for v0.1; broader multi-provider registry (OpenAI, HuggingFace, LiteLLM variants) shifts to v0.3.
-- **Data flow**: Ingest list of `ContentUnit` → embed them → run clustering → derive representatives → optionally call labeling pipeline → output `ClusterAssignment` + `LabelResult` collections.
+- **Configuration surface**: Dataclass-based configs that callers instantiate and optionally modify before passing to functions.
+- **Embedding connectors**: `embeddings/adapters.py` OpenAI and Fireworks providers available in v0.1, with Fireworks as default; broader multi-provider registry (OpenAI, HuggingFace, LiteLLM variants) shifts to v0.3.
+- **Data flow**: Ingest ContentUnitCollection container which is list of `ContentUnit` → embed them → run clustering → derive representatives → optionally call labeling pipeline → output returns the same collection populated with cluster assignments (cluster IDs), Visualization artifacts, diagnostics metrics.
 
 - **Testing hooks**: integration tests use small synthetic corpora and seeded random generators if necessary.
 
@@ -51,8 +50,6 @@
 - Deterministic operations (seeded random states for embeddings where controllable, clustering, and sampling).
 <!-- - Dependency injection for external services (embedding models, LLM clients, vector stores) to keep core logic testable. -->
 - Token-aware design: Represent clusters via a capped number of representative samples before any LLM invocation.
-<!-- - Extensibility: Use strategy classes for clustering and labeling so alternates (e.g., hierarchical clustering, summarization-based labeling) can plug in later. -->
-<!-- - Non-destructive visualization: plotting utilities consume copies of data; no mutation of core artifacts. -->
 
 ## Versioned Implementation Plan
 
@@ -61,25 +58,25 @@
 - Establish installable package skeleton with `pyproject.toml`/`setup.cfg` scaffolding.
 - Implement embedding ingestion and K-Means clustering with deterministic seeding, attempting silhouette-based auto-selection of `n_clusters` when feasible while retaining a configurable fallback value (references: K-Means – https://scikit-learn.org/stable/modules/generated/sklearn.cluster.KMeans.html, silhouette score – https://scikit-learn.org/stable/modules/generated/sklearn.metrics.silhouette_score.html).
 - Generate an initial UMAP-based visualization to inspect cluster separation.
-- Expose `constella.pipelines.workflow.cluster_texts(texts, config)` returning cluster IDs, centers, metadata, and any silhouette diagnostics gathered. 
+- Expose `constella.pipelines.workflow.cluster_texts(texts, config)` returning the collection with attached cluster IDs, metrics snapshot (silhouette, inertia, etc.), and visualization artifact references when generated.
 - If data visualisation is requested as a parameter, then generate and save a UMAP projection of the cluster as an image or PDF.
 
 **Modules & Responsibilities**
-- `config/schemas.py`: Define lightweight `ClusteringConfig` (fallback `n_clusters`, random seed, silhouette toggles) and optional `VisualizationConfig`.
-- `data/models.py`: Define dataclasses for `ContentUnit`, `EmbeddingVector`, `ClusterAssignment`.
+- `config/schemas.py`: Define dataclasses `ClusteringConfig` (fallback `n_clusters`, random seed, toggles for algorithms to find number of cluster like silhouette, Davies-Bouldin and elbow methods) and `VisualizationConfig`, plus snapshots for clustering metrics and visualization artifacts stored on collections.
+- `data/models.py`: Define dataclasses for `ContentUnit`, `ContentUnitCollection`.
 - `embeddings/base.py`: Minimal interface `embed_texts(self, texts: List[str]) -> List[List[float]]`. Provide an in-memory mock provider for tests.
-- `embeddings/adapters.py`: Implement LiteLLM-backed connector calling OpenAI embedding model `text-embedding-3-small`; expand to multi-provider registry in v0.3.
-- `clustering/kmeans.py`: Function `run_kmeans(vectors: np.ndarray, config: ClusteringConfig) -> ClusterAssignment` using scikit-learn KMeans; evaluate candidate cluster counts via silhouette scoring when input size allows and fall back to the configured default, logging inertia either way.
-- `visualization/umap.py`: Utility to project embeddings in UI for qualitative inspection of the clusters.
-- `pipelines/workflow.py`: Orchestrate embed -> cluster -> (optional) visualize; convert embeddings to numpy arrays. When visualization is requested, save the UMAP plot to disk without forcing display or returning coordinates.
+- `embeddings/adapters.py`: Implement LiteLLM-backed connector calling providers like OpenAI embedding model `text-embedding-3-small` and Fireworks. Implemented token-aware batching and concurrent/async processing for embedding request for faster results;
+- `clustering/kmeans.py`: Function `run_kmeans(collection: ContentUnitCollection, config: Optional[ClusteringConfig]) -> ContentUnitCollection` attaching cluster IDs and metrics snapshots while evaluating silhouette, Davies-Bouldin, and elbow methods before falling back to configured defaults.
+- `visualization/umap.py`: Utility to project embeddings in UI for qualitative inspection of the clusters. Static plots as image as well as interactive D3.js HTML visualization.
+- `pipelines/workflow.py`: Orchestrate embed -> cluster -> (optional) visualize; convert embeddings to numpy arrays. When visualization is requested, save the UMAP plot to disk and return the enriched `ContentUnitCollection` with metrics/artifact metadata attached.
 - `config/settings.yaml`: Deferred; use module-level logging configuration in v0.1.
 
 **Data Flow**
-1. Client passes `List[ContentUnit]` or `List[str]` with optional lightweight workflow parameters.
-2. `cluster_texts` instantiates the LiteLLM-based embedding provider
-3. Embedding vectors are generated in-memory, converted to `np.ndarray`, and used to evaluate silhouette scores across candidate cluster counts, to find optimum number of clusters, before running K-Means with the optimum (or fallback) `n_clusters`.
-4. UMAP projection is computed from the embedding matrix for visualization. If visualization is requested, persist the plot as an image/PDF (UMAP coordinates need not be returned).
-5. Output `ClusterAssignment` object containing cluster assignments per ContentUnit, cluster centers, cluster sizes, and silhouette diagnostics.
+1. Client instantiates `ClusteringConfig` and/or `VisualizationConfig` objects with desired parameters, then passes `ContentUnitCollection` to workflow functions along with config objects.
+2. `cluster_texts` instantiates the LiteLLM-based embedding provider (defaults to Fireworks provider).
+3. Embedding vectors are generated in-memory, converted to `np.ndarray`, and optimal number of clusters is determined using Silhouette, Davies-Bouldin, and elbow methods before running K-Means with the optimum (or fallback) `n_clusters`.
+4. UMAP projection is computed from the embedding matrix for visualization. If visualization config is provided, persist the plot as an image and HTML/JS interactive visualization.
+5. Output returns the updated collection (with optional artifact metadata when visualization is enabled); diagnostics such as inertia are captured in the collection's metrics snapshot.
 
 **Testing**
 - Unit tests for `run_kmeans` (expected cluster counts with seeded inputs), silhouette-based selection paths, `cluster_texts` (ensures pipeline integrates and returns deterministic outputs for synthetic data), and UMAP projection shape validation.
@@ -133,6 +130,7 @@
 - `config/prompts.yaml`: Store parameterized prompt templates; include structures to build instructions referencing representative texts, token budgets, and desired output schema.
 - `pipelines/workflow.py`: Extend `cluster_texts` (renamed `cluster_and_label`) or add new function that orchestrates labeling stage when `enable_labeling` flag is true. Provide synchronous wrapper that runs asyncio event loop as needed.
 - `data/models.py`: Add `LabelResult` (phrase, explanation, confidence, metadata) with optional `subthemes` extension structure.
+- Extensibility: Use strategy classes for clustering and labeling so alternates (e.g., hierarchical clustering, summarization-based labeling) can plug in later.
 
 **Token Control Strategy**
 - Estimate prompt tokens per representative using heuristic or optional integration with tokenizer library (exposed via extension point `token_estimator` function in config).
@@ -190,7 +188,7 @@
 
 ## Data & Artifact Management
 - Provide structured outputs:
-  - `ClusterAssignment`: labels, centers, metrics, config snapshot.
+  - `ContentUnitCollection`: units enriched with embeddings, cluster IDs, clustering metrics snapshots, and visualization artifact metadata.
   - `RepresentativeSet`: mapping of cluster_id -> `List[RepresentativeSample]` with token estimations.
   - `LabelCollection`: mapping of cluster_id -> `LabelResult` (with provenance metadata, e.g., LLM model, prompt hash).
   - `DiagnosticReport`: summary metrics, outlier list, optional visualization paths.

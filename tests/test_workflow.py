@@ -24,21 +24,31 @@ def test_cluster_texts_with_mock_embeddings(tmp_path: Path):
         [1.1, 1.0],
     ])
     provider = InMemoryEmbeddingProvider(embeddings)
-    config = ClusteringConfig(seed=5, fallback_n_clusters=2)
+    config = ClusteringConfig(
+        seed=5,
+        fallback_n_clusters=2,
+        enable_silhouette_selection=False,
+        enable_elbow_selection=False,
+        enable_davies_bouldin_selection=False,
+    )
     viz_config = VisualizationConfig(output_path=tmp_path / "plot.png", random_state=5)
 
-    result_collection, artifacts, metrics = cluster_texts(
+    result_collection = cluster_texts(
         collection,
         clustering_config=config,
         visualization_config=viz_config,
         embedding_provider=provider,
     )
 
-    assert metrics["silhouette_score"] is not None
-    assert artifacts is not None and len(artifacts) == 2
-    for artifact in artifacts:
+    artifacts = result_collection.artifacts
+    assert artifacts is not None
+    assert artifacts.generated is True
+    for artifact in (artifacts.static_plot, artifacts.html_plot):
+        assert artifact is not None
         assert Path(artifact).exists()
     assert [unit.embedding for unit in result_collection] == embeddings.tolist()
+    assert len(set(unit.cluster_id for unit in result_collection)) == 2
+    assert result_collection.metrics is not None
 
 
 def test_cluster_texts_accepts_content_units():
@@ -50,13 +60,12 @@ def test_cluster_texts_accepts_content_units():
     provider = InMemoryEmbeddingProvider(embeddings)
     config = ClusteringConfig(seed=2, fallback_n_clusters=2, enable_silhouette_selection=False)
 
-    result_collection, artifacts, metrics = cluster_texts(
+    result_collection = cluster_texts(
         collection,
         clustering_config=config,
         embedding_provider=provider,
     )
 
     assert set(unit.cluster_id for unit in result_collection) == {0, 1}
-    assert artifacts is None
-    assert metrics["n_clusters"] == 2
+    assert result_collection.artifacts is None
     assert [unit.embedding for unit in result_collection] == embeddings.tolist()

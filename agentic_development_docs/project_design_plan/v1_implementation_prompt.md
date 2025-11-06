@@ -16,12 +16,12 @@ Implement only the **v0.1 – Minimal Embedding & Clustering Pipeline**  for the
 1. Installable project skeleton (`pyproject.toml`/`constella/` package) aligned with the architecture defined in the design plan.
 2. v0.1 module implementations (these are also given in `@agentic_development_docs/project_design_plan/0_constella_design_plan.md`)
    - `config/schemas.py`: lightweight `ClusteringConfig` (+ optional `VisualizationConfig`) capturing seed, fallback `n_clusters`, silhouette toggles, and visualization output path.
-   - `data/models.py`: dataclasses for `ContentUnit`, `EmbeddingVector`, and `ClusterAssignment` (holding assignments, centers, metrics, config snapshot).
+   - `data/models.py`: dataclasses for `ContentUnit`, `EmbeddingVector`, and collections that hold embeddings plus cluster IDs directly on each unit.
    - `embeddings/base.py`: interface `EmbeddingProvider` with `embed_texts`. Include an in-memory/mock provider for tests.
    - `embeddings/adapters.py`: LiteLLM-based adapter targeting OpenAI `text-embedding-3-small`, with graceful handling of missing credentials.
-   - `clustering/kmeans.py`: deterministic K-Means runner that optionally searches candidate `n_clusters` via silhouette score before falling back to config default; return inertia and silhouette diagnostics.
+   - `clustering/kmeans.py`: deterministic K-Means runner that optionally searches candidate `n_clusters` via silhouette score before falling back to config default; emits cluster labels.
    - `visualization/umap.py`: utility to project embeddings and (when requested) persist a UMAP scatter plot without forcing display.
-   - `pipelines/workflow.py`: `cluster_texts(texts_or_units, clustering_config, visualization_config=None)` orchestrating embedding → clustering → optional visualization, returning a `ClusterAssignment` and any generated artifact paths.
+   - `pipelines/workflow.py`: `cluster_texts(texts_or_units, clustering_config, visualization_config=None)` orchestrating embedding → clustering → optional visualization, returning the enriched `ContentUnitCollection` plus visualization paths when requested.
 3. Module-level logging (basic configuration only; defer YAML settings to later versions).
 4. Tests under `tests/` validating deterministic clustering, silhouette branch behavior, workflow integration with mock embeddings, and UMAP projection shape/file creation.
 5. Create and update README.md file with the README instructions of v0.1 features of the project.

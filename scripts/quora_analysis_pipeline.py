@@ -13,7 +13,7 @@ import logging
 import os
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import psycopg
 
@@ -74,14 +74,15 @@ def fetch_content_units(conn: psycopg.Connection, limit: Optional[int] = None) -
                 identifier=identifier,
                 text=answer_content,
                 title=question_text,
-                name=question_url,
+                name=question_text,
                 path=answered_question_url,
                 size=f"{len(answer_content)} characters" if answer_content else None,
                 metadata1={
+                    "question_text": question_text,
                     "question_url": question_url,
                     "answered_question_url": answered_question_url,
                 },
-                metadata2={"question_text": question_text} if question_text else {},
+                metadata2={},
             )
         )
 
@@ -97,22 +98,24 @@ def ensure_output_dir(path: Path) -> Path:
 def serialize_assignments(
     output_dir: Path,
     collection: ContentUnitCollection,
-    metrics: Dict[str, object],
     config: ClusteringConfig,
 ) -> Path:
+    cluster_assignments = {
+        unit.identifier: int(unit.cluster_id)
+        for unit in collection
+        if unit.cluster_id is not None
+    }
+
+    metrics = collection.metrics
+    snapshot = metrics.config_snapshot if metrics and metrics.config_snapshot is not None else config
+
     payload = {
-        "assignments": {
-            unit.identifier: int(unit.cluster_id)
-            for unit in collection
-            if unit.cluster_id is not None
-        },
-        "metadata": {
-            "silhouette_score": metrics.get("silhouette_score"),
-            "inertia": metrics.get("inertia"),
-            "n_clusters": metrics.get("n_clusters"),
-            "centers": metrics.get("centers"),
-            "config_snapshot": asdict(config),
-        },
+        "assignments": cluster_assignments,
+        "n_clusters": metrics.n_clusters if metrics else None,
+        "silhouette_score": metrics.silhouette_score if metrics else None,
+        "inertia": metrics.inertia if metrics else None,
+        "centers": metrics.centers if metrics else None,
+        "config": asdict(snapshot),
     }
 
     output_path = output_dir / "clusters.json"
@@ -125,8 +128,19 @@ def _json_dumps(payload: Dict[str, object]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+def _configure_logging(level: str) -> None:
+    logging.basicConfig(level=level.upper(), format="%(asctime)s %(levelname)s %(message)s")
+
+
+def _build_configs(args: argparse.Namespace, output_dir: Path) -> Tuple[ClusteringConfig, VisualizationConfig]:
+    clustering_config = ClusteringConfig()
+    png_path = output_dir / f"{args.umap_filename}.png"
+    viz_config = VisualizationConfig(output_path=png_path)
+    return clustering_config, viz_config
+
+
 def run_cli_pipeline(args: argparse.Namespace) -> None:
-    logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(message)s")
+    _configure_logging(args.log_level)
 
     if not args.database_url:
         raise SystemExit("DATABASE_URL must be provided via --database-url or environment variable.")
@@ -141,14 +155,12 @@ def run_cli_pipeline(args: argparse.Namespace) -> None:
     output_dir = ensure_output_dir(args.output_dir)
 
     LOGGER.info("Running Constella clustering pipeline")
-    clustering_config = ClusteringConfig()
-    png_path = output_dir / f"{args.umap_filename}.png"
-    viz_config = VisualizationConfig(output_path=png_path)
+    clustering_config, viz_config = _build_configs(args, output_dir)
 
     LOGGER.info("Running clustering workflow")
     collection = ContentUnitCollection(units)
 
-    collection, artifacts, metrics = execute_workflow(
+    collection = execute_workflow(
         collection,
         steps=("embed", "cluster", "visualize"),
         configs={
@@ -157,11 +169,13 @@ def run_cli_pipeline(args: argparse.Namespace) -> None:
         },
     )
 
-    serialize_assignments(output_dir, collection, metrics, clustering_config)
+    serialize_assignments(output_dir, collection, clustering_config)
 
+    artifacts = collection.artifacts
     if artifacts:
-        for artifact in artifacts:
-            LOGGER.info("Generated artifact: %s", artifact)
+        for artifact in (artifacts.static_plot, artifacts.html_plot):
+            if artifact is not None and Path(artifact).exists():
+                LOGGER.info("Generated artifact: %s", artifact)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
