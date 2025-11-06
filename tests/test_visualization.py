@@ -35,8 +35,15 @@ def test_create_umap_plot_html_generates_hoverable_artifact(tmp_path):
     projection = np.array([[0.0, 0.0], [1.0, 1.0]])
     labels = [0, 1]
     units = [
-        ContentUnit(identifier="unit_a", text="alpha"),
-        ContentUnit(identifier="unit_b", text="beta"),
+        ContentUnit(
+            identifier="unit_a",
+            text="alpha",
+            title="Title A",
+            name="Name A",
+            path="/path/a",
+            size="120 chars",
+        ),
+        ContentUnit(identifier="unit_b", text="beta", title="Title B"),
     ]
     config = VisualizationConfig(output_path=tmp_path / "plot.png", random_state=7)
 
@@ -54,6 +61,10 @@ def test_create_umap_plot_html_generates_hoverable_artifact(tmp_path):
     assert "Sample" in content
     assert "alpha" in content
     assert "unit_a" in content
+    assert "Title A" in content
+    assert "Name A" in content
+    assert "/path/a" in content
+    assert "120 chars" in content
 
 
 def test_create_umap_plot_html_validates_lengths(tmp_path):

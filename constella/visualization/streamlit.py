@@ -24,22 +24,20 @@ class StreamlitUMAPArtifact:
 def create_umap_plot_html(
     projection: np.ndarray,
     labels: Sequence[int],
-    texts_or_units: Sequence[str | ContentUnit],
+    units: Sequence[ContentUnit],
 ) -> StreamlitUMAPArtifact:
     """Return metadata for a Streamlit-backed interactive UMAP visualization.
 
     This is a placeholder to orchestrate Streamlit usage without a direct dependency.
     """
 
-    normalized_texts = []
-    normalized_ids = []
-    for idx, item in enumerate(texts_or_units):
-        if isinstance(item, ContentUnit):
-            normalized_ids.append(item.identifier)
-            normalized_texts.append(item.text)
-        else:
-            normalized_ids.append(f"item_{idx}")
-            normalized_texts.append(str(item))
+    if projection.shape[0] != len(units):
+        raise ValueError("Projection rows must match number of content units.")
+    if projection.shape[0] != len(labels):
+        raise ValueError("Labels must align with projection rows.")
+
+    normalized_ids = [unit.identifier for unit in units]
+    normalized_texts = [unit.get_content() for unit in units]
 
     return StreamlitUMAPArtifact(
         html_path="/tmp/umap_plot.html",

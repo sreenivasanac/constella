@@ -17,11 +17,11 @@ Processing tens of thousands of content units for auto-grouping and auto-labelin
 ## Architecture at a Glance
 
 - `constella.embeddings.adapters` — LiteLLM providers for Fireworks and OpenAI with concurrency, token-count heuristics, and configurable API bases.
-- `constella.clustering.kmeans` — K-Means runner with candidate search, metric scoring, and fallbacks for numerically unstable cases.
+- `constella.clustering.kmeans` — K-Means runner with candidate search, metric scoring.
 - `constella.visualization.umap` — UMAP projection plus static and interactive plotting utilities.
 - `constella.labeling.llm` — Placeholder entry points for future LLM-backed auto-labeling.
 - `constella.pipelines.workflow.cluster_texts` — End-to-end orchestrator that normalizes inputs, generates embeddings, runs clustering, and optionally persists visualizations, returning the enriched collection.
-- `constella.config.schemas` / `constella.data.models` — Frozen dataclasses that capture reproducible configuration and output artefacts.
+- `constella.config.schemas` / `constella.data.models` — dataclasses that capture reproducible configuration and output artefacts.
 - `scripts.quora_analysis_pipeline` — CLI runner for the Quora dataset that saves cluster assignments and reports generated artifacts.
 
 ## Workflow
@@ -30,7 +30,7 @@ Processing tens of thousands of content units for auto-grouping and auto-labelin
 2. The Fireworks provider (or a configured alternative) embeds the texts using LiteLLM with CPU-bound batching and token budgeting.
 3. Candidate cluster sizes are evaluated with silhouette, elbow, and Davies–Bouldin heuristics before selecting the final `k`.
 4. A seeded K-Means run produces cluster assignments.
-5. If visualization is enabled, embeddings are projected with UMAP and saved to disk as PNG and/or D3.js-based interactive HTML artefacts for downstream review.
+5. If visualization is enabled, embeddings are projected with UMAP and saved to disk as PNG and/or D3.js-based interactive HTML artifacts for downstream review.
 
 ## Advantages
 
