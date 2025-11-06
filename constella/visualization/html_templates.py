@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+from importlib import resources
+from string import Template
+
+
+_TEMPLATE_NAME = "umap_hover.html"
+
+
+@lru_cache(maxsize=1)
+def _load_umap_hover_template() -> Template:
+    template_path = resources.files(__package__) / _TEMPLATE_NAME
+    with template_path.open("r", encoding="utf-8") as template_file:
+        return Template(template_file.read())
+
 
 def build_umap_hover_html(
     *,
@@ -17,399 +31,23 @@ def build_umap_hover_html(
 ) -> str:
     """Return an HTML document embedding an interactive hoverable UMAP scatter."""
 
-    d3_include = "  <script src=\"https://cdn.jsdelivr.net/npm/d3@7\"></script>\n"
-    script_include = d3_include
+    script_lines = [
+        '  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>'
+    ]
     if data_script_path:
-        script_include += f"  <script src=\"{data_script_path}\" defer></script>\n"
+        script_lines.append(f'  <script src="{data_script_path}" defer></script>')
+    script_includes = "\n".join(script_lines) + "\n"
 
-    return f"""<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\" />
-  <title>UMAP Projection</title>
-  <style>
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;
-      background: #f9fafb;
-      color: #111827;
-      margin: 0;
-      padding: 24px;
-    }}
-    h1 {{
-      font-size: 1.5rem;
-      margin-bottom: 16px;
-    }}
-    .plot-container {{
-      position: relative;
-      max-width: {width}px;
-    }}
-    #umap-plot {{
-      width: 100%;
-      height: auto;
-      background: #ffffff;
-      border: 1px solid #e5e7eb;
-      border-radius: 6px;
-      box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
-    }}
-    .axis path,
-    .axis line {{
-      stroke: #4b5563;
-      stroke-width: 1;
-      pointer-events: none;
-      fill: none;
-    }}
-    .axis text {{
-      fill: #1f2937;
-      font-size: 0.7rem;
-    }}
-    .axis-label {{
-      fill: #1f2937;
-      font-size: 0.8rem;
-      font-weight: 600;
-      pointer-events: none;
-    }}
-    .tooltip {{
-      position: absolute;
-      display: none;
-      min-width: 220px;
-      max-width: 320px;
-      padding: 12px;
-      background: rgba(17, 24, 39, 0.92);
-      color: #f9fafb;
-      border-radius: 8px;
-      pointer-events: none;
-      box-shadow: 0 6px 20px rgba(15, 23, 42, 0.2);
-      white-space: pre-wrap;
-      line-height: 1.4;
-      z-index: 10;
-    }}
-    .tooltip strong {{
-      display: block;
-      font-size: 0.95rem;
-      margin-bottom: 4px;
-    }}
-    .tooltip .tooltip-id {{
-      font-size: 0.85rem;
-      opacity: 0.85;
-      margin-bottom: 4px;
-    }}
-    .tooltip .tooltip-text {{
-      font-size: 0.85rem;
-    }}
-    .legend {{
-      display: none;
-      position: absolute;
-      bottom: 20px;
-      left: 20px;
-      max-width: 240px;
-      padding: 12px;
-      background: rgba(255, 255, 255, 0.94);
-      border: 1px solid rgba(17, 24, 39, 0.15);
-      border-radius: 6px;
-      box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
-      gap: 8px;
-      grid-template-columns: 1fr;
-    }}
-    .legend-item {{
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 0.85rem;
-      color: #111827;
-    }}
-    .legend-swatch {{
-      width: 14px;
-      height: 14px;
-      border-radius: 3px;
-      border: 1px solid rgba(17, 24, 39, 0.4);
-      flex-shrink: 0;
-    }}
-  </style>
-</head>
-<body>
-  <h1 id=\"plot-title\"></h1>
-  <div class=\"plot-container\">
-    <svg id=\"umap-plot\" viewBox=\"0 0 {width} {height}\" role=\"img\" aria-labelledby=\"plot-title\"></svg>
-    <div id=\"tooltip\" class=\"tooltip\"></div>
-    <div id="legend" class="legend" aria-label="Cluster color mapping"></div>
-  </div>
-  <script type="application/json" id="umap-data-preview">{preview_json}</script>
-{script_include}  <script>
-    const DATA_READY_EVENT = "umap-data-ready";
-    const pageTitle = {title_json};
-    const width = {width};
-    const height = {height};
-    const padding = 40;
-    const xMin = {x_min};
-    const xMax = {x_max};
-    const yMin = {y_min};
-    const yMax = {y_max};
+    context = {
+        "script_includes": script_includes,
+        "title_json": title_json,
+        "width": width,
+        "height": height,
+        "x_min": x_min,
+        "x_max": x_max,
+        "y_min": y_min,
+        "y_max": y_max,
+        "preview_json": preview_json,
+    }
 
-    const svgElement = document.getElementById("umap-plot");
-    const tooltip = document.getElementById("tooltip");
-    const legendContainer = document.getElementById("legend");
-
-    const svg = d3
-      .select(svgElement)
-      .attr("width", width)
-      .attr("height", height)
-      .attr("viewBox", "0 0 {width} {height}")
-      .attr("role", "img")
-      .attr("aria-labelledby", "plot-title");
-
-    let plotInitialized = false;
-
-    function getExternalData() {{
-      if (Array.isArray(window.UMAP_DATA)) {{
-        return window.UMAP_DATA;
-      }}
-      return null;
-    }}
-
-    function formatTick(value) {{
-      if (!Number.isFinite(value)) {{
-        return "";
-      }}
-      const formatted = d3.format(".2f")(value);
-      return formatted === "-0.00" ? "0.00" : formatted;
-    }}
-
-    function normalizeDomain(min, max) {{
-      if (!Number.isFinite(min) || !Number.isFinite(max)) {{
-        return [0, 1];
-      }}
-      if (min === max) {{
-        const base = Math.abs(min);
-        const delta = base > 1 ? base * 0.01 : 1;
-        return [min - delta, max + delta];
-      }}
-      return [min, max];
-    }}
-
-    function showTooltip(evt, point) {{
-      tooltip.innerHTML = "";
-
-      const labelLine = document.createElement("strong");
-      const labelValue = point && point.label !== undefined ? point.label : "Unknown";
-      labelLine.textContent = "Cluster " + labelValue;
-      tooltip.appendChild(labelLine);
-
-      const idLine = document.createElement("div");
-      idLine.className = "tooltip-id";
-      idLine.textContent = point && point.identifier ? point.identifier : "";
-      tooltip.appendChild(idLine);
-
-      const textLine = document.createElement("div");
-      textLine.className = "tooltip-text";
-      textLine.textContent = point && point.text ? point.text : "";
-      tooltip.appendChild(textLine);
-
-      tooltip.style.display = "block";
-      const pageX = evt && typeof evt.pageX === "number" ? evt.pageX : 0;
-      const pageY = evt && typeof evt.pageY === "number" ? evt.pageY : 0;
-      tooltip.style.left = String(pageX + 12) + "px";
-      tooltip.style.top = String(pageY + 12) + "px";
-    }}
-
-    function moveTooltip(evt) {{
-      const pageX = evt && typeof evt.pageX === "number" ? evt.pageX : 0;
-      const pageY = evt && typeof evt.pageY === "number" ? evt.pageY : 0;
-      tooltip.style.left = String(pageX + 12) + "px";
-      tooltip.style.top = String(pageY + 12) + "px";
-    }}
-
-    function hideTooltip() {{
-      tooltip.style.display = "none";
-    }}
-
-    function renderPlot(data) {{
-      if (plotInitialized) {{
-        return;
-      }}
-      if (!Array.isArray(data)) {{
-        return;
-      }}
-
-      plotInitialized = true;
-      document.getElementById("plot-title").textContent = pageTitle;
-      svg.selectAll("*").remove();
-
-      const [xDomainMin, xDomainMax] = normalizeDomain(xMin, xMax);
-      const [yDomainMin, yDomainMax] = normalizeDomain(yMin, yMax);
-
-      const xScale = d3
-        .scaleLinear()
-        .domain([xDomainMin, xDomainMax])
-        .nice()
-        .range([padding, width - padding]);
-
-      const yScale = d3
-        .scaleLinear()
-        .domain([yDomainMin, yDomainMax])
-        .nice()
-        .range([height - padding, padding]);
-
-      const tickCount = 5;
-      const axisBottom = d3
-        .axisBottom(xScale)
-        .ticks(tickCount)
-        .tickFormat(formatTick)
-        .tickSizeInner(8)
-        .tickSizeOuter(0);
-      const axisTop = d3
-        .axisTop(xScale)
-        .ticks(tickCount)
-        .tickFormat(formatTick)
-        .tickSizeInner(8)
-        .tickSizeOuter(0);
-      const axisLeft = d3
-        .axisLeft(yScale)
-        .ticks(tickCount)
-        .tickFormat(formatTick)
-        .tickSizeInner(8)
-        .tickSizeOuter(0);
-      const axisRight = d3
-        .axisRight(yScale)
-        .ticks(tickCount)
-        .tickFormat(formatTick)
-        .tickSizeInner(8)
-        .tickSizeOuter(0);
-
-      svg
-        .append("g")
-        .attr("class", "axis axis-bottom")
-        .attr("transform", `translate(0,${{height - padding}})`)
-        .call(axisBottom);
-
-      svg
-        .append("g")
-        .attr("class", "axis axis-top")
-        .attr("transform", `translate(0,${{padding}})`)
-        .call(axisTop);
-
-      svg
-        .append("g")
-        .attr("class", "axis axis-left")
-        .attr("transform", `translate(${{padding}},0)`)
-        .call(axisLeft);
-
-      svg
-        .append("g")
-        .attr("class", "axis axis-right")
-        .attr("transform", `translate(${{width - padding}},0)`)
-        .call(axisRight);
-
-      svg
-        .append("text")
-        .attr("class", "axis-label")
-        .attr("x", width / 2)
-        .attr("y", height - padding + 36)
-        .attr("text-anchor", "middle")
-        .attr("dominant-baseline", "hanging")
-        .text("UMAP 1");
-
-      svg
-        .append("text")
-        .attr("class", "axis-label")
-        .attr("x", padding - 44)
-        .attr("y", height / 2)
-        .attr("text-anchor", "middle")
-        .attr("dominant-baseline", "middle")
-        .attr("transform", `rotate(-90 ${{padding - 44}} ${{height / 2}})`)
-        .text("UMAP 2");
-
-      const legendItems = Array.from(
-        data.reduce((acc, point) => {{
-          const label = point && point.label !== undefined ? String(point.label) : "Unknown";
-          if (!acc.has(label)) {{
-            const color = point && point.color ? point.color : "#1f77b4";
-            acc.set(label, color);
-          }}
-          return acc;
-        }}, new Map())
-      );
-
-      const pointGroup = svg.append("g").attr("class", "points");
-
-      pointGroup
-        .selectAll("circle")
-        .data(data)
-        .join("circle")
-        .attr("cx", (point) => {{
-          const coord = point && typeof point.x === "number" ? point.x : 0;
-          return xScale(coord);
-        }})
-        .attr("cy", (point) => {{
-          const coord = point && typeof point.y === "number" ? point.y : 0;
-          return yScale(coord);
-        }})
-        .attr("r", 5)
-        .attr("fill", (point) => (point && point.color ? point.color : "#1f77b4"))
-        .attr("stroke", "#1f2937")
-        .attr("stroke-width", 0.5)
-        .on("mouseenter", (event, point) => showTooltip(event, point))
-        .on("mousemove", (event) => moveTooltip(event))
-        .on("mouseleave", hideTooltip);
-
-      if (legendContainer) {{
-        const legend = d3.select(legendContainer);
-        if (legendItems.length > 0) {{
-          legend.style("display", "grid");
-          const legendSelection = legend
-            .selectAll(".legend-item")
-            .data(legendItems, (entry) => entry[0]);
-
-          const legendEnter = legendSelection
-            .enter()
-            .append("div")
-            .attr("class", "legend-item");
-
-          legendEnter.append("span").attr("class", "legend-swatch");
-          legendEnter.append("span").attr("class", "legend-label");
-
-          legendSelection
-            .merge(legendEnter)
-            .each(function ([label, color]) {{
-              const selection = d3.select(this);
-              selection
-                .select(".legend-swatch")
-                .style("background-color", color || "#1f77b4");
-              selection.select(".legend-label").text(label);
-            }});
-
-          legendSelection.exit().remove();
-        }} else {{
-          legend.style("display", "none");
-          legend.selectAll("*").remove();
-        }}
-      }}
-    }}
-
-    function scheduleRender() {{
-      const immediateData = getExternalData();
-      if (Array.isArray(immediateData)) {{
-        renderPlot(immediateData);
-        return;
-      }}
-
-      document.addEventListener(
-        DATA_READY_EVENT,
-        () => {{
-          const readyData = getExternalData();
-          if (Array.isArray(readyData)) {{
-            renderPlot(readyData);
-          }}
-        }},
-        {{ once: true }}
-      );
-    }}
-
-    if (document.readyState === "loading") {{
-      document.addEventListener("DOMContentLoaded", scheduleRender, {{ once: true }});
-    }} else {{
-      scheduleRender();
-    }}
-  </script>
-</body>
-</html>
-"""
+    return _load_umap_hover_template().safe_substitute(context)
