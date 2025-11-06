@@ -21,9 +21,9 @@ class ContentUnit:
     embedding: Optional[List[float]] = None
     # Pass a human-readable size description (e.g., "5 MB", "100 characters")
     size: Optional[str] = None
-    # Metadata 1 will be used in embedding
+    # Metadata 1 will be used in embedding and printing
     metadata1: Dict[str, Any] = field(default_factory=dict)
-    # Metadata 2 will NOT be used in embedding
+    # Metadata 2 will NOT be used in embedding and printing
     metadata2: Dict[str, Any] = field(default_factory=dict)
     cluster_id: Optional[int] = None
 
@@ -35,6 +35,19 @@ class ContentUnit:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def get_content(self) -> str:
+        parts: List[str] = []
+        for value in (self.title, self.name, self.path, self.cluster_id, self.text, self.size):
+            if isinstance(value, (str, int)) and value:
+                parts.append(str(value))
+
+        parts.extend(str(val) for val in self.metadata1.values() if val is not None)
+
+        if not parts:
+            parts.append(self.identifier)
+
+        return "\n".join(parts)
 
 
 class ContentUnitCollection(MutableSequence[ContentUnit]):
@@ -96,41 +109,7 @@ class ContentUnitCollection(MutableSequence[ContentUnit]):
         return self.all_texts()
 
     def all_texts(self) -> List[str]:
-        def _normalize(value: Any) -> Optional[str]:
-            if isinstance(value, str):
-                stripped = value.strip()
-                return stripped or None
-            if value is not None:
-                return str(value)
-            return None
-
-        combined: List[str] = []
-        for unit in self._units:
-            parts = [
-                fragment
-                for attr in ("title", "name", "text")
-                for fragment in (_normalize(getattr(unit, attr)),)
-                if fragment
-            ]
-
-            path_fragment = _normalize(unit.path)
-            if path_fragment:
-                parts.append(path_fragment)
-
-            for metadata in (unit.metadata1, unit.metadata2):
-                if metadata:
-                    parts.extend(
-                        fragment
-                        for fragment in (_normalize(val) for val in metadata.values())
-                        if fragment
-                    )
-
-            if not parts:
-                parts.append(unit.identifier)
-
-            combined.append("\n".join(parts))
-
-        return combined
+        return [unit.get_content() for unit in self._units]
 
     def identifiers(self) -> List[str]:
         return [unit.identifier for unit in self._units]

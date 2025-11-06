@@ -21,7 +21,7 @@ Implement only the **v0.1 – Minimal Embedding & Clustering Pipeline**  for the
    - `embeddings/adapters.py`: LiteLLM-based adapter targeting OpenAI `text-embedding-3-small`, with graceful handling of missing credentials.
    - `clustering/kmeans.py`: deterministic K-Means runner that optionally searches candidate `n_clusters` via silhouette score before falling back to config default; emits cluster labels.
    - `visualization/umap.py`: utility to project embeddings and (when requested) persist a UMAP scatter plot without forcing display.
-   - `pipelines/workflow.py`: `cluster_texts(texts_or_units, clustering_config, visualization_config=None)` orchestrating embedding → clustering → optional visualization, returning the enriched `ContentUnitCollection` plus visualization paths when requested.
+   - `pipelines/workflow.py`: `cluster_texts(content_units, clustering_config, visualization_config=None)` orchestrating embedding → clustering → optional visualization, returning the enriched `ContentUnitCollection` plus visualization paths when requested.
 3. Module-level logging (basic configuration only; defer YAML settings to later versions).
 4. Tests under `tests/` validating deterministic clustering, silhouette branch behavior, workflow integration with mock embeddings, and UMAP projection shape/file creation.
 5. Create and update README.md file with the README instructions of v0.1 features of the project.

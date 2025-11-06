@@ -12,9 +12,9 @@ class ClusteringConfig:
     """Settings controlling the deterministic K-Means workflow."""
 
     seed: int = 42
-    fallback_n_clusters: int = 5
+    fallback_n_clusters: int = 8
     min_cluster_count: int = 2
-    max_candidate_clusters: int = 10
+    max_candidate_clusters: int = 15
     enable_silhouette_selection: bool = True
     silhouette_sample_size: Optional[int] = None
     enable_elbow_selection: bool = True
@@ -26,9 +26,9 @@ class VisualizationConfig:
 
     output_path: Path
     show_plot: bool = False
-    n_neighbors: int = 15
-    min_dist: float = 0.1
-    random_state: Optional[int] = None
+    n_neighbors: int = 30
+    min_dist: float = 0.3
+    random_state: Optional[int] = 40
 
 
 @dataclass

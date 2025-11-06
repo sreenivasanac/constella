@@ -121,13 +121,11 @@ def create_umap_plot_html(
     projection: np.ndarray,
     labels: Sequence[int],
     config: VisualizationConfig,
-    texts_or_units: Sequence[str | ContentUnit],
+    units: Sequence[ContentUnit],
     title: Optional[str] = None,
     output_path: Optional[Path] = None
 ) -> Path:
-    """Persist an interactive HTML scatter plot with hover tooltips.
-
-    """
+    """Persist an interactive HTML scatter plot with hover tooltips."""
 
     if projection.ndim != 2 or projection.shape[1] != 2:
         raise ValueError("Projection must be a 2D array with two columns.")
@@ -135,20 +133,18 @@ def create_umap_plot_html(
         raise ValueError("Need at least one embedding to render the HTML plot.")
     if len(labels) != projection.shape[0]:
         raise ValueError("Number of labels must match projection rows.")
-    if len(texts_or_units) != projection.shape[0]:
-        raise ValueError("Number of texts/content units must match projection rows.")
+    if len(units) != projection.shape[0]:
+        raise ValueError("Number of content units must match projection rows.")
 
     target_path = Path(output_path) if output_path else Path(config.output_path)
     if target_path.suffix.lower() != ".html":
         target_path = target_path.with_suffix(".html")
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
-    normalized_meta = []
-    for idx, item in enumerate(texts_or_units):
-        if isinstance(item, ContentUnit):
-            normalized_meta.append({"identifier": item.identifier, "text": item.text})
-        else:
-            normalized_meta.append({"identifier": f"item_{idx}", "text": str(item)})
+    normalized_meta = [
+        {"identifier": unit.identifier, "text": unit.get_content()}
+        for unit in units
+    ]
 
     unique_labels = sorted({int(label) for label in labels})
     cmap = colormaps.get_cmap("Spectral")

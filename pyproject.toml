@@ -20,6 +20,7 @@ requires-python = ">=3.11,<3.14"
     "numba>=0.62.1",
     "streamlit>=1.37",
     "litellm>=1.79",
+    "psycopg>=3.2.12",
 ]
 
 [project.optional-dependencies]

@@ -14,4 +14,10 @@ https://scikit-learn.org/stable/modules/generated/sklearn.cluster.KMeans.html
 the documentation for scikit-learn silhoutte score is given here:
 https://scikit-learn.org/stable/modules/generated/sklearn.metrics.silhouette_score.html
 
+- the documentation for scikit-learn Davies Boulding score is given here:
+https://scikit-learn.org/stable/modules/generated/sklearn.metrics.davies_bouldin_score.html
+
+- The Davies Boulding index algorithm and sample code is given here:
+https://www.geeksforgeeks.org/machine-learning/davies-bouldin-index/
+
 - whenever running python or related scripts (like pytest, pip) - use uv instead of directly running.

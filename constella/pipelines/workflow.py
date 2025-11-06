@@ -69,7 +69,7 @@ def generate_visualization(
         projection,
         labels,
         config,
-        texts_or_units=collection.units(),
+        units=collection.units(),
         title=title,
         output_path=Path(config.output_path).with_suffix(".html"),
     )
