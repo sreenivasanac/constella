@@ -9,26 +9,28 @@ Processing tens of thousands of content units for auto-grouping and auto-labelin
 ## Key Capabilities
 
 - **Token-aware embedding pipeline:** LiteLLM-backed providers for Fireworks (default) and OpenAI automatically batch requests, cap per-batch tokens, and run concurrently to maximize throughput while respecting provider limits.
-- **Deterministic clustering:** A dataclass-driven `ClusteringConfig` feeds multi-metric model selection (silhouette, elbow, Davies–Bouldin) before running K-Means with a fixed seed, producing reproducible clusters and inertia diagnostics.
-- **Rich diagnostics:** Every `ClusterAssignment` snapshot contains selected `n_clusters`, centroids, inertia, and optional silhouette scores for auditability.
+- **Deterministic clustering:** A dataclass-driven `ClusteringConfig` feeds multi-metric model selection (silhouette, elbow, Davies–Bouldin) before running K-Means with a fixed seed, producing reproducible cluster assignments and logging inertia diagnostics.
+- **Lightweight outputs:** Cluster IDs and clustering diagnostics live on the returned `ContentUnitCollection`, keeping the API surface compact while retaining provenance information.
 - **Visualization tooling:** UMAP helpers generate publication-ready PNG plots and companion D3.js-powered interactive HTML scatter views with hover tooltips, making manual inspection of clusters fast even in headless environments.
-- **Composable data models:** Lightweight `ContentUnit`, `EmbeddingVector`, and `ClusterAssignment` dataclasses provide a typed interface.
+- **Composable data models:** Lightweight dataclasses (`ContentUnit`, `ContentUnitCollection`) capture common ContentUnit attributes, and have embedding and cluster assignment values.
 
 ## Architecture at a Glance
 
 - `constella.embeddings.adapters` — LiteLLM providers for Fireworks and OpenAI with concurrency, token-count heuristics, and configurable API bases.
-- `constella.clustering.kmeans` — K-Means runner with candidate search, metric scoring, and fallbacks for numerically unstable cases.
+- `constella.clustering.kmeans` — K-Means runner with candidate search, metric scoring.
 - `constella.visualization.umap` — UMAP projection plus static and interactive plotting utilities.
-- `constella.pipelines.workflow.cluster_texts` — End-to-end orchestrator that normalizes inputs, generates embeddings, runs clustering, and optionally persists visualizations.
-- `constella.config.schemas` / `constella.data.models` — Frozen dataclasses that capture reproducible configuration and output artefacts.
+- `constella.labeling.llm` — Placeholder entry points for future LLM-backed auto-labeling.
+- `constella.pipelines.workflow.cluster_texts` — End-to-end orchestrator that normalizes inputs, generates embeddings, runs clustering, and optionally persists visualizations, returning the enriched collection.
+- `constella.config.schemas` / `constella.data.models` — dataclasses that capture reproducible configuration and output artefacts.
+- `scripts.quora_analysis_pipeline` — CLI runner for the Quora dataset that saves cluster assignments and reports generated artifacts.
 
 ## Workflow
 
-1. Pass a list of raw strings or `ContentUnit` objects into `cluster_texts` with an optional `ClusteringConfig` and `VisualizationConfig`.
+1. Pass a `ContentUnitCollection` into `cluster_texts` with an optional `ClusteringConfig` (or overrides) and `VisualizationConfig`.
 2. The Fireworks provider (or a configured alternative) embeds the texts using LiteLLM with CPU-bound batching and token budgeting.
 3. Candidate cluster sizes are evaluated with silhouette, elbow, and Davies–Bouldin heuristics before selecting the final `k`.
-4. A seeded K-Means run produces assignments, cluster centres, and inertia diagnostics which are returned as a `ClusterAssignment` snapshot.
-5. If visualization is enabled, embeddings are projected with UMAP and saved to disk as PNG and/or D3.js-based interactive HTML artefacts for downstream review.
+4. A seeded K-Means run produces cluster assignments.
+5. If visualization is enabled, embeddings are projected with UMAP and saved to disk as PNG and/or D3.js-based interactive HTML artifacts for downstream review.
 
 ## Advantages
 
@@ -70,13 +72,26 @@ To run the tests locally:
 from pathlib import Path
 
 from constella.config.schemas import ClusteringConfig, VisualizationConfig
+from constella.data.models import ContentUnit, ContentUnitCollection
 from constella.pipelines.workflow import cluster_texts
 
-texts = ["First document", "Second document", "Third document"]
-config = ClusteringConfig(seed=8, fallback_n_clusters=2)
-viz = VisualizationConfig(output_path=Path("/tmp/umap.png"), random_state=8)
+units = ContentUnitCollection([
+    ContentUnit(identifier="doc_1", text="First document"),
+    ContentUnit(identifier="doc_2", text="Second document"),
+    ContentUnit(identifier="doc_3", text="Third document"),
+])
 
-assignment, artifacts, embeddings = cluster_texts(texts, config, viz)
+collection = cluster_texts(
+    units,
+    clustering_config=ClusteringConfig(fallback_n_clusters=2, seed=8),
+    visualization_config=VisualizationConfig(output_path=Path("/tmp/umap.png"), random_state=8),
+)
+
+if collection.metrics:
+    print("Clusters:", collection.metrics.n_clusters)
+    print("Silhouette score:", collection.metrics.silhouette_score)
+
+if collection.artifacts:
+    print("Visualization saved to %s %s", collection.artifacts.static_plot, collection.artifacts.html_plot)
 ```
-
-`assignment` captures cluster memberships, centroids, inertia, and any computed silhouette score, while `artifacts` contains the generated plot locations (PNG/HTML). The raw `embeddings` list can be cached or fed into downstream analytics, persistence layers, or labelling workflows.
+`collection` contains cluster assignments on each `ContentUnit`, plus optional metrics and visualization artifact paths for downstream workflows.

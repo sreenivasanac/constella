@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from numpy.random import RandomState
 from sklearn.cluster import KMeans
 from sklearn.metrics import davies_bouldin_score, silhouette_score
 
-from constella.config.schemas import ClusteringConfig
+from constella.config.schemas import ClusteringConfig, ClusteringMetrics
+
+if TYPE_CHECKING:  # pragma: no cover - import for typing only
+    from constella.data.models import ContentUnitCollection
 
 
 LOGGER = logging.getLogger(__name__)
@@ -21,17 +24,19 @@ LOGGER = logging.getLogger(__name__)
 
 def _candidate_clusters(config: ClusteringConfig, sample_size: int) -> Sequence[int]:
     """Derive feasible cluster counts constrained by config limits and sample size."""
-    max_candidates = min(config.max_candidate_clusters, sample_size - 1)
-    min_candidates = max(config.min_cluster_count, 2)
-    if max_candidates < min_candidates:
-        max_candidates = min_candidates
-    # Start with the continuous range permitted by the configuration.
-    base_range = list(range(min_candidates, max_candidates + 1))
-    # Ensure the fallback option is always considered even if outside the range.
-    if config.fallback_n_clusters not in base_range:
-        base_range.append(min(config.fallback_n_clusters, sample_size))
-    unique = sorted({k for k in base_range if 1 < k <= sample_size})
-    return unique or [min(sample_size, max(2, config.fallback_n_clusters))]
+
+    if sample_size <= 2:
+        return [min(sample_size, max(1, config.fallback_n_clusters))]
+
+    lower = max(2, min(config.min_cluster_count, sample_size - 1))
+    upper = min(config.max_candidate_clusters, sample_size - 1)
+    if upper < lower:
+        upper = lower
+
+    fallback = min(sample_size - 1, max(2, config.fallback_n_clusters))
+    candidates = {fallback, *range(lower, upper + 1)}
+    filtered = sorted(k for k in candidates if 1 < k < sample_size)
+    return filtered or [fallback]
 
 
 def _resolve_kmeans_init(vectors: np.ndarray) -> str:
@@ -52,31 +57,6 @@ def _fit_kmeans(
     return model, labels
 
 
-def _resolve_silhouette_sample_size(
-    requested: Optional[int],
-    n_samples: int,
-    n_labels: int,
-) -> Optional[int]:
-    if requested is None or n_samples <= 2:
-        return None
-
-    max_usable = n_samples - 1
-    if max_usable <= n_labels:
-        return None
-
-    adjusted = min(max(requested, 2), max_usable)
-    min_required = n_labels + 1
-    if min_required >= n_samples:
-        return None
-    if adjusted < min_required:
-        adjusted = min_required
-
-    if adjusted >= n_samples or adjusted <= n_labels:
-        return None
-
-    return int(adjusted)
-
-
 def _safe_silhouette_score(
     vectors: np.ndarray,
     labels: np.ndarray,
@@ -88,11 +68,14 @@ def _safe_silhouette_score(
     if unique_labels.size <= 1 or unique_labels.size >= len(vectors):
         return None
 
-    effective_sample = _resolve_silhouette_sample_size(
-        sample_size,
-        len(vectors),
-        unique_labels.size,
-    )
+    effective_sample = None
+    if sample_size is not None and len(vectors) > 2:
+        max_usable = len(vectors) - 1
+        min_required = unique_labels.size + 1
+        if max_usable > unique_labels.size and min_required < len(vectors):
+            bounded = min(max(sample_size, min_required), max_usable)
+            if unique_labels.size < bounded < len(vectors):
+                effective_sample = int(bounded)
 
     try:
         with warnings.catch_warnings():
@@ -161,6 +144,26 @@ def _evaluate_candidate_metrics(
     rng = RandomState(config.seed)
     init_method = _resolve_kmeans_init(vectors)
 
+    metric_callbacks: List[Tuple[str, Callable[[np.ndarray, int], Optional[float]]]] = []
+
+    if config.enable_silhouette_selection:
+        def _silhouette(labels: np.ndarray, k: int) -> Optional[float]:
+            score = _safe_silhouette_score(vectors, labels, sample_size, rng, f"for k={k}")
+            if score is not None:
+                LOGGER.debug("Silhouette score for k=%s: %s", k, score)
+            return score
+
+        metric_callbacks.append(("silhouette", _silhouette))
+
+    if config.enable_davies_bouldin_selection:
+        def _davies(labels: np.ndarray, k: int) -> Optional[float]:
+            score = _safe_davies_bouldin_score(vectors, labels, f"for k={k}")
+            if score is not None:
+                LOGGER.debug("Davies-Bouldin score for k=%s: %s", k, score)
+            return score
+
+        metric_callbacks.append(("davies_bouldin", _davies))
+
     metrics: Dict[int, Dict[str, float]] = {}
 
     for k in candidates:
@@ -174,52 +177,40 @@ def _evaluate_candidate_metrics(
 
         entry: Dict[str, float] = {"inertia": float(km.inertia_)}
 
-        if config.enable_silhouette_selection:
-            sil_score = _safe_silhouette_score(
-                vectors,
-                labels,
-                sample_size,
-                rng,
-                f"for k={k}",
-            )
-            if sil_score is not None:
-                LOGGER.debug("Silhouette score for k=%s: %s", k, sil_score)
-                entry["silhouette"] = sil_score
-
-        if config.enable_davies_bouldin_selection:
-            db_score = _safe_davies_bouldin_score(vectors, labels, f"for k={k}")
-            if db_score is not None:
-                LOGGER.debug("Davies-Bouldin score for k=%s: %s", k, db_score)
-                entry["davies_bouldin"] = db_score
+        for name, callback in metric_callbacks:
+            value = callback(labels, k)
+            if value is not None:
+                entry[name] = value
 
         metrics[k] = entry
 
     return metrics
 
 
-def _best_silhouette_choice(metrics: Dict[int, Dict[str, float]]) -> Optional[int]:
-    best_score = float("-inf")
+def _best_metric_choice(
+    metrics: Dict[int, Dict[str, float]],
+    metric_name: str,
+    prefer_max: bool,
+) -> Optional[int]:
+    best_value: Optional[float] = None
     best_k: Optional[int] = None
-    for k, values in metrics.items():
-        score = values.get("silhouette")
-        if score is None:
-            continue
-        if score > best_score or (score == best_score and (best_k is None or k < best_k)):
-            best_score = score
-            best_k = k
-    return best_k
 
-
-def _best_davies_bouldin_choice(metrics: Dict[int, Dict[str, float]]) -> Optional[int]:
-    best_score = float("inf")
-    best_k: Optional[int] = None
     for k, values in metrics.items():
-        score = values.get("davies_bouldin")
-        if score is None:
+        value = values.get(metric_name)
+        if value is None:
             continue
-        if score < best_score or (score == best_score and (best_k is None or k < best_k)):
-            best_score = score
+
+        better = (
+            best_value is None
+            or (prefer_max and value > best_value)
+            or (not prefer_max and value < best_value)
+            or (value == best_value and best_k is not None and k < best_k)
+        )
+
+        if better:
+            best_value = value
             best_k = k
+
     return best_k
 
 
@@ -233,8 +224,16 @@ def _select_cluster_count(vectors: np.ndarray, config: ClusteringConfig) -> int:
         LOGGER.warning("No viable cluster candidates succeeded; using fallback=%s", config.fallback_n_clusters)
         return min(len(vectors), max(2, config.fallback_n_clusters))
 
-    silhouette_choice = _best_silhouette_choice(metrics) if config.enable_silhouette_selection else None
-    davies_choice = _best_davies_bouldin_choice(metrics) if config.enable_davies_bouldin_selection else None
+    silhouette_choice = (
+        _best_metric_choice(metrics, "silhouette", prefer_max=True)
+        if config.enable_silhouette_selection
+        else None
+    )
+    davies_choice = (
+        _best_metric_choice(metrics, "davies_bouldin", prefer_max=False)
+        if config.enable_davies_bouldin_selection
+        else None
+    )
 
     if config.enable_silhouette_selection and silhouette_choice is None:
         LOGGER.warning("Silhouette selection produced no valid candidates; considering alternatives")
@@ -271,18 +270,27 @@ def _select_cluster_count(vectors: np.ndarray, config: ClusteringConfig) -> int:
     return final_k
 
 
-def run_kmeans(vectors: Iterable[Sequence[float]], config: ClusteringConfig) -> Tuple[List[int], Dict[str, object]]:
-    """Select an appropriate cluster count, run K-Means, and return labels with metrics."""
+def run_kmeans(
+    collection: "ContentUnitCollection",
+    config: Optional[ClusteringConfig] = None,
+) -> "ContentUnitCollection":
+    """Select an appropriate cluster count, run K-Means, and attach results to the collection."""
 
-    array = np.array(list(vectors), dtype=np.float64)
+    if len(collection) == 0:
+        raise ValueError("Input collection must not be empty.")
+
+    embeddings = collection.embedding_matrix()
+    array = np.array(list(embeddings), dtype=np.float64)
     if array.ndim != 2 or array.size == 0:
-        raise ValueError("Input vectors must form a non-empty 2D array.")
+        raise ValueError("Embeddings must form a non-empty 2D array.")
 
-    n_clusters = _select_cluster_count(array, config)
+    resolved_config = config or ClusteringConfig()
+
+    n_clusters = _select_cluster_count(array, resolved_config)
     n_clusters = min(n_clusters, len(array))
 
     try:
-        km, labels = _fit_kmeans(array, n_clusters, config.seed, 'k-means++')
+        km, labels = _fit_kmeans(array, n_clusters, resolved_config.seed, 'k-means++')
     except (RuntimeWarning, FloatingPointError, Exception) as exc:  # pragma: no cover - sklearn edge cases
         LOGGER.error("Critical numerical error in main K-Means fitting: %s", exc)
         raise
@@ -290,20 +298,22 @@ def run_kmeans(vectors: Iterable[Sequence[float]], config: ClusteringConfig) -> 
     silhouette = _safe_silhouette_score(
         array,
         labels,
-        config.silhouette_sample_size,
-        RandomState(config.seed),
+        resolved_config.silhouette_sample_size,
+        RandomState(resolved_config.seed),
         "for final clustering",
     )
 
     LOGGER.info("Clustering completed with inertia=%s", km.inertia_)
+    if silhouette is not None:
+        LOGGER.info("Silhouette score=%.4f", silhouette)
 
-    metrics: Dict[str, object] = {
-        "inertia": float(km.inertia_),
-        "silhouette_score": float(silhouette) if silhouette is not None else None,
-        "n_clusters": int(n_clusters),
-        "centers": km.cluster_centers_.tolist(),
-    }
+    collection.attach_cluster_ids(labels.tolist())
+    collection.metrics = ClusteringMetrics(
+        n_clusters=int(n_clusters),
+        inertia=float(km.inertia_),
+        silhouette_score=float(silhouette) if silhouette is not None else None,
+        centers=km.cluster_centers_.tolist(),
+        config_snapshot=resolved_config,
+    )
 
-    metrics["config_snapshot"] = config
-
-    return labels.tolist(), metrics
+    return collection
