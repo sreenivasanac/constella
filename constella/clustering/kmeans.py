@@ -11,7 +11,8 @@ from numpy.random import RandomState
 from sklearn.cluster import KMeans
 from sklearn.metrics import davies_bouldin_score, silhouette_score
 
-from constella.config.schemas import ClusteringConfig, ClusteringMetrics
+from constella.config.schemas import ClusteringConfig
+from constella.data.results import ClusteringMetrics
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from constella.data.models import ContentUnitCollection
@@ -289,8 +290,10 @@ def run_kmeans(
     n_clusters = _select_cluster_count(array, resolved_config)
     n_clusters = min(n_clusters, len(array))
 
+    init_method = _resolve_kmeans_init(array)
+
     try:
-        km, labels = _fit_kmeans(array, n_clusters, resolved_config.seed, 'k-means++')
+        km, labels = _fit_kmeans(array, n_clusters, resolved_config.seed, init_method)
     except (RuntimeWarning, FloatingPointError, Exception) as exc:  # pragma: no cover - sklearn edge cases
         LOGGER.error("Critical numerical error in main K-Means fitting: %s", exc)
         raise
@@ -312,7 +315,6 @@ def run_kmeans(
         n_clusters=int(n_clusters),
         inertia=float(km.inertia_),
         silhouette_score=float(silhouette) if silhouette is not None else None,
-        centers=km.cluster_centers_.tolist(),
         config_snapshot=resolved_config,
     )
 

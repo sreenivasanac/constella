@@ -19,7 +19,6 @@ def _load_umap_hover_template() -> Template:
 
 def build_umap_hover_html(
     *,
-    data_script_path: str | None,
     title_json: str,
     width: int,
     height: int,
@@ -31,15 +30,7 @@ def build_umap_hover_html(
 ) -> str:
     """Return an HTML document embedding an interactive hoverable UMAP scatter."""
 
-    script_lines = [
-        '  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>'
-    ]
-    if data_script_path:
-        script_lines.append(f'  <script src="{data_script_path}" defer></script>')
-    script_includes = "\n".join(script_lines) + "\n"
-
     context = {
-        "script_includes": script_includes,
         "title_json": title_json,
         "width": width,
         "height": height,
