@@ -86,18 +86,18 @@
 ### v0.2 – Representative Selection & Artifact Persistence
 **Goals**
 - Provide representative sampling near cluster centroids to support labeling.
-- Persist clustering artifacts (JSON + optional parquet/arrow) for downstream use.
+- Persist clustering artifacts (JSON of labeled clusters) for downstream use.
 - Introduce optional disk-backed cache for embeddings to avoid recomputation on reruns.
 - Externalize logging defaults via `config/settings.yaml` loader and broaden workflow configuration support.
 
 **Modules & Enhancements**
-- `clustering/selection.py`: Implement `select_representatives(assignment, vectors, config)` returning per-cluster indices + similarity scores. Algorithm: compute centroid distances; allow fallback to density-aware sampling (median distance) if clusters > threshold.
-- `pipelines/workflow.py`: Extend output to include representative metadata (indices, similarity) and attach raw texts via cross-reference; add configuration for `n_representatives`, `min_cluster_size`, and batching controls introduced at this stage.
+- `clustering/selection.py`: Implement `select_representatives(...)` returning per-cluster `RepresentativeSample` objects using a centroid-first selection plus seeded random diversity picks.
+- `pipelines/workflow.py`: Surface representatives alongside clustering outputs and wire selection + optional labeling into the orchestration helpers.
 - `utils/batching.py`: Provide streaming generator to iterate texts/embeddings; include optional disk caching (e.g., using `joblib` or `.npy` files) wired via config flag.
 - `data/models.py`: Add `EmbeddingBatch` (for streamed accumulation) and `RepresentativeSample` dataclasses capturing `cluster_id`, `text`, `vector_index`, `similarity`.
 - `pipelines/workflow.py`: Write optional `persist_artifacts(output_dir, assignment, representatives, config)` storing JSON summary plus serialized numpy arrays (respect config toggles).
 - `config/settings.yaml`: Introduce shared logging defaults and helper loader hooked into pipeline utilities.
-- `config/schemas.py`: Promote full `WorkflowConfig` validation and richer configuration schemas.
+- `config/schemas.py`: Promote full `WorkflowConfig` validation and richer configuration schemas. Add `RepresentativeSelectionConfig` to tune core ratio, random seed, and metadata capture for sampling.
 - `config/settings.yaml`: Establish shared logging defaults with helper loader used across pipeline utilities.
 
 **Token Efficiency Preparation**
@@ -145,6 +145,23 @@
 - Ensure token budgeting selects subset matching expectations via targeted unit tests.
 - Integration test verifying combined pipeline returns labels within configured token limits.
 
+### v0.3 – LLM-Assisted Labeling with OpenAI Provider
+- Invoke LiteLLM OpenAI models with prompts to assign structured labels using previously sampled representatives.
+- Offer synchronous and optional asynchronous execution with bounded concurrency.
+- Parse JSON responses safely and attach `LabelResult` metadata to the collection for downstream consumption.
+
+
+
+- `labeling/llm.py`: Implements `auto_label_clusters`, JSON sanitisation, confidence/keyword coercion, and fallback labels on failure.
+- `config/schemas.py`: Expand `LabelingConfig` with model, temperature, retry strategy, async controls, and prompt override.
+- `pipelines/workflow.py`: Allow `cluster_texts` to trigger representative selection and labeling when configs are supplied.
+- `data/models.py`: Provide `LabelResult` dataclass stored on the collection.
+
+**Prompt Strategy**
+- Default system prompt emphasises token efficiency and representative-based inference; user prompt lists cluster stats plus formatted `ContentUnit.get_content()` values with truncated text and metadata lines.
+- Output schema enforced via JSON-only instruction requiring `label`, `explanation`, `confidence`, and `keywords` fields.
+- Since representatives are capped at the config-defined limit, token budgeting relies on deterministic truncation rather than dynamic estimation.
+
 ### v0.4 – Visualization & Advanced Diagnostics
 **Goals**
 - Introduce UMAP-based dimensionality reduction and plotting utilities capable of reproducing diagnostics similar to `old_code/umap.py` and the associated PNG.
@@ -166,11 +183,16 @@
 - Validate that metrics functions handle small cluster counts gracefully (returning `None` when sample size insufficient).
 
 ## Automated Labeling Strategy Details
-- **Representative Selection**: Use `select_representatives` outputs sorted by similarity score.
-- **Prompt Construction**: Supply at most `max_representatives_per_cluster` texts; each text truncated to `max_chars_per_rep` (configurable) with ellipsis to stay within token limit.
-- **LLM Output Schema**: `{"phrase": str, "explanation": str, "confidence": float, "notes": Optional[str]}`. Confidence defaults to heuristic if model does not supply.
+
+
+
+- **Representative Selection**: `select_representatives` returns centroid-adjacent "core" samples plus seeded random "diversity" samples for each cluster, embedding metadata collected from the original `ContentUnit`.
+- **Prompt Construction**: `ContentUnit.get_content(max_char_to_truncate)` emits `Key: value` lines (title, name, path, size, metadata, truncated text) that feed straight into the labeling prompt, keeping instructions compact and informative.
+- **LLM Output Schema**: JSON object with `label`, `explanation`, `confidence`, and `keywords` fields; post-processing coerces confidence into `[0, 1]` and normalises keywords to a list of strings.
+- **Error Handling**: JSON parse failures trigger retries with exponential backoff; exhausting retries yields a fallback label `"Cluster <id>"` with explanation `"Automatic labeling failed"` and diagnostic logging for review.
+
+TODO:
 - **Refinement**: Optional second-pass using prompt referencing initial phrase + up to `refinement_examples` to disambiguate similar cluster names (inspired by `HierarchicalThemeManager` but simplified to cluster-level only at v0.3).
-- **Error Handling**: On JSON parse failure, log warning, retry with fallback prompt that explicitly asks for JSON. After max retries, emit default label `"Cluster <id>"` with explanation `"Automatic labeling failed"` and mark status for downstream review.
 
 ## Assumptions, Dependencies & Extension Points
 - **Assumptions**
@@ -189,7 +211,7 @@
 ## Data & Artifact Management
 - Provide structured outputs:
   - `ContentUnitCollection`: units enriched with embeddings, cluster IDs, clustering metrics snapshots, and visualization artifact metadata.
-  - `RepresentativeSet`: mapping of cluster_id -> `List[RepresentativeSample]` with token estimations.
+  - `RepresentativeSet`: mapping of cluster_id -> `List[RepresentativeSample]` capturing centroid distance, similarity, and optional metadata for each selected unit.
   - `LabelCollection`: mapping of cluster_id -> `LabelResult` (with provenance metadata, e.g., LLM model, prompt hash).
   - `DiagnosticReport`: summary metrics, outlier list, optional visualization paths.
 - Persist artifacts using JSON (for metadata) and `.npy`/`.pkl` (for numeric arrays) with explicit version tags in filenames (e.g., `clusters_v0.2.json`).

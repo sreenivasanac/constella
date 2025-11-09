@@ -16,7 +16,7 @@ def test_project_embeddings_shape(tmp_path):
         [1.0, 0.9, 1.1],
         [0.1, 0.2, 0.0],
     ])
-    config = VisualizationConfig(output_path=tmp_path / "plot.png", random_state=7)
+    config = VisualizationConfig(output_path=tmp_path, random_state=7)
     projection = project_embeddings(vectors, config)
 
     assert projection.shape == (3, 2)
@@ -24,16 +24,18 @@ def test_project_embeddings_shape(tmp_path):
 
 def test_save_umap_plot_creates_file(tmp_path):
     projection = np.array([[0.0, 0.0], [1.0, 1.0]])
-    labels = [0, 1]
-    config = VisualizationConfig(output_path=tmp_path / "plot.png", random_state=7)
-    path = save_umap_plot(projection, labels, config)
+    labels = ["Cluster 0", "Cluster 1"]
+    config = VisualizationConfig(output_path=tmp_path, random_state=7)
+    artifact_dir = tmp_path / "artifacts_run"
+    path = save_umap_plot(projection, labels, config, artifact_dir=artifact_dir)
 
+    assert path == artifact_dir / "umap.png"
     assert path.exists()
 
 
 def test_create_umap_plot_html_generates_hoverable_artifact(tmp_path):
     projection = np.array([[0.0, 0.0], [1.0, 1.0]])
-    labels = [0, 1]
+    labels = ["Alpha Topics", "Beta Topics"]
     units = [
         ContentUnit(
             identifier="unit_a",
@@ -45,7 +47,8 @@ def test_create_umap_plot_html_generates_hoverable_artifact(tmp_path):
         ),
         ContentUnit(identifier="unit_b", text="beta", title="Title B"),
     ]
-    config = VisualizationConfig(output_path=tmp_path / "plot.png", random_state=7)
+    config = VisualizationConfig(output_path=tmp_path, random_state=7)
+    artifact_dir = tmp_path / "artifacts_run"
 
     html_path = create_umap_plot_html(
         projection,
@@ -53,12 +56,17 @@ def test_create_umap_plot_html_generates_hoverable_artifact(tmp_path):
         config,
         units,
         title="Sample",
+        artifact_dir=artifact_dir,
     )
 
     assert html_path.exists()
     assert html_path.suffix == ".html"
+    assert html_path == artifact_dir / "umap.html"
+    data_script = artifact_dir / "umap_data.js"
+    assert data_script.exists()
     content = html_path.read_text(encoding="utf-8")
     assert "Sample" in content
+    assert "Alpha Topics" in content
     assert "alpha" in content
     assert "unit_a" in content
     assert "Title A" in content
@@ -69,12 +77,12 @@ def test_create_umap_plot_html_generates_hoverable_artifact(tmp_path):
 
 def test_create_umap_plot_html_validates_lengths(tmp_path):
     projection = np.array([[0.0, 0.0]])
-    labels = [0, 1]
+    labels = ["Cluster 0", "Cluster 1"]
     units = [ContentUnit(identifier="x", text="x-text"), ContentUnit(identifier="y", text="y-text")]
-    config = VisualizationConfig(output_path=tmp_path / "plot.png", random_state=7)
+    config = VisualizationConfig(output_path=tmp_path, random_state=7)
 
     with pytest.raises(ValueError):
-        create_umap_plot_html(projection, labels, config, units)
+        create_umap_plot_html(projection, labels, config, units, artifact_dir=tmp_path)
 
 
 

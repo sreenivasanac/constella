@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -20,47 +20,47 @@ class ClusteringConfig:
     enable_elbow_selection: bool = True
     enable_davies_bouldin_selection: bool = True
 
+
 @dataclass
 class VisualizationConfig:
     """Configuration for optional UMAP visualization generation."""
 
-    output_path: Path
+    output_path: Path = Path("/tmp/constella_artifacts")
     show_plot: bool = False
     n_neighbors: int = 30
     min_dist: float = 0.3
     random_state: Optional[int] = 40
 
+    def __post_init__(self) -> None:
+        resolved = Path(self.output_path)
+        if resolved.suffix:
+            raise ValueError("VisualizationConfig.output_path must be a directory path")
+        self.output_path = resolved
+
+
+@dataclass
+class RepresentativeSelectionConfig:
+    """Configuration controlling representative sampling per cluster."""
+
+    n_representatives: int = 20
+    core_ratio: float = 0.6
+    random_seed: int = 42
+    diversity_sampling: bool = True
+
 
 @dataclass
 class LabelingConfig:
-    """Minimal configuration for future automatic cluster labeling."""
+    """Configuration for automatic cluster labeling via LiteLLM providers."""
 
-    provider: str = "fireworks"
-    max_representatives: int = 5
-    prompt_template: Optional[str] = None
-
-
-@dataclass(frozen=True)
-class ClusteringMetrics:
-    """Snapshot of clustering diagnostics captured during K-Means execution."""
-
-    n_clusters: int
-    inertia: Optional[float] = None
-    silhouette_score: Optional[float] = None
-    centers: Optional[List[List[float]]] = None
-    config_snapshot: Optional[ClusteringConfig] = None
-
-
-@dataclass
-class VisualizationArtifacts:
-    """References to visualization artifacts generated during the workflow."""
-
-    static_plot: Optional[Path] = None
-    html_plot: Optional[Path] = None
-
-    @property
-    def generated(self) -> bool:
-        return any((self.static_plot, self.html_plot))
-
-    def __bool__(self) -> bool:  # pragma: no cover - truthiness convenience
-        return self.generated
+    llm_provider: str = "openai"
+    model: str = "gpt-4o-mini"
+    temperature: float = 0.1
+    max_output_tokens: int = 2000  # 16,384 is the max output tokens of gpt-4o-mini
+    # max_chars_per_rep: maximum characters from ContentUnit text attribute, after which text attribute is truncated.
+    # Used to save on tokens
+    max_chars_per_rep: int = 700
+    max_retries: int = 3
+    retry_backoff_seconds: Tuple[float, float] = (1.0, 4.0)
+    async_mode: bool = False
+    max_concurrency: int = 6
+    system_prompt_override: Optional[str] = None

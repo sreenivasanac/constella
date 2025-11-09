@@ -15,9 +15,16 @@
       font-size: 1.5rem;
       margin-bottom: 16px;
     }
+    .visualization-layout {
+      display: flex;
+      align-items: flex-start;
+      gap: 24px;
+      width: calc(${width}px + 280px);
+      max-width: 100%;
+    }
     .plot-container {
       position: relative;
-      max-width: ${width}px;
+      width: ${width}px;
     }
     #umap-plot {
       width: 100%;
@@ -74,10 +81,8 @@
     }
     .legend {
       display: none;
-      position: absolute;
-      bottom: 20px;
-      left: 20px;
-      max-width: 240px;
+      min-width: 240px;
+      max-width: 280px;
       padding: 12px;
       background: rgba(255, 255, 255, 0.94);
       border: 1px solid rgba(17, 24, 39, 0.15);
@@ -85,6 +90,7 @@
       box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
       gap: 8px;
       grid-template-columns: 1fr;
+      align-self: flex-start;
     }
     .legend-item {
       display: flex;
@@ -104,13 +110,17 @@
 </head>
 <body>
   <h1 id="plot-title"></h1>
-  <div class="plot-container">
-    <svg id="umap-plot" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="plot-title"></svg>
-    <div id="tooltip" class="tooltip"></div>
+  <div class="visualization-layout">
+    <div class="plot-container">
+      <svg id="umap-plot" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="plot-title"></svg>
+      <div id="tooltip" class="tooltip"></div>
+    </div>
     <div id="legend" class="legend" aria-label="Cluster color mapping"></div>
   </div>
   <script type="application/json" id="umap-data-preview">${preview_json}</script>
-${script_includes}  <script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="umap_data.js" defer></script>
+  <script>
     const DATA_READY_EVENT = "umap-data-ready";
     const pageTitle = ${title_json};
     const width = ${width};
@@ -167,12 +177,21 @@ ${script_includes}  <script>
 
       const labelLine = document.createElement("strong");
       const labelValue = point && point.label !== undefined ? point.label : "Unknown";
-      labelLine.textContent = "Cluster " + labelValue;
+      labelLine.textContent = labelValue;
       tooltip.appendChild(labelLine);
 
       const idLine = document.createElement("div");
       idLine.className = "tooltip-id";
-      idLine.textContent = point && point.identifier ? point.identifier : "";
+      const clusterId = point && point.cluster_id !== undefined ? point.cluster_id : null;
+      const identifier = point && point.identifier ? point.identifier : "";
+      const idSegments = [];
+      if (clusterId !== null) {
+        idSegments.push(`Cluster ID: ${clusterId}`);
+      }
+      if (identifier) {
+        idSegments.push(identifier);
+      }
+      idLine.textContent = idSegments.join(" | ");
       tooltip.appendChild(idLine);
 
       const textLine = document.createElement("div");

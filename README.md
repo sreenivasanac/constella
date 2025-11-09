@@ -8,18 +8,20 @@ Processing tens of thousands of content units for auto-grouping and auto-labelin
 
 ## Key Capabilities
 
-- **Token-aware embedding pipeline:** LiteLLM-backed providers for Fireworks (default) and OpenAI automatically batch requests, cap per-batch tokens, and run concurrently to maximize throughput while respecting provider limits.
+- **Token-aware embedding pipeline:** LiteLLM-backed providers for any LLM Embedding API (Fireworks, OpenAI etc). Automatically batch embedding requests, cap per-batch tokens, and run concurrently to maximize throughput while respecting provider limits.
 - **Deterministic clustering:** A dataclass-driven `ClusteringConfig` feeds multi-metric model selection (silhouette, elbow, Davies–Bouldin) before running K-Means with a fixed seed, producing reproducible cluster assignments and logging inertia diagnostics.
-- **Lightweight outputs:** Cluster IDs and clustering diagnostics live on the returned `ContentUnitCollection`, keeping the API surface compact while retaining provenance information.
-- **Visualization tooling:** UMAP helpers generate publication-ready PNG plots and companion D3.js-powered interactive HTML scatter views with hover tooltips, making manual inspection of clusters fast even in headless environments.
+- **Lightweight outputs:** Assigned Cluster IDs and clustering diagnostics live on the returned `ContentUnitCollection`, keeping the API surface compact while retaining provenance information.
+- **LLM-assisted auto-labelling:** Deterministic representative sampling plus LiteLLM OpenAI prompts yield structured labels (name, explanation, confidence, keywords) for each cluster.
+- **Visualization tooling:** Visualise the clusters in image format and D3.js-powered interactive HTML scatter views with hover tooltips, making manual inspection of clusters.
 - **Composable data models:** Lightweight dataclasses (`ContentUnit`, `ContentUnitCollection`) capture common ContentUnit attributes, and have embedding and cluster assignment values.
 
 ## Architecture at a Glance
 
 - `constella.embeddings.adapters` — LiteLLM providers for Fireworks and OpenAI with concurrency, token-count heuristics, and configurable API bases.
 - `constella.clustering.kmeans` — K-Means runner with candidate search, metric scoring.
+- `constella.labeling.selection` — Representative sampling yielding centroid-aligned core samples plus diversity picks for downstream labelling.
 - `constella.visualization.umap` — UMAP projection plus static and interactive plotting utilities.
-- `constella.labeling.llm` — Placeholder entry points for future LLM-backed auto-labeling.
+- `constella.labeling.llm` — Prompt orchestration, LiteLLM OpenAI calls, and JSON parsing for cluster auto-labelling.
 - `constella.pipelines.workflow.cluster_texts` — End-to-end orchestrator that normalizes inputs, generates embeddings, runs clustering, and optionally persists visualizations, returning the enriched collection.
 - `constella.config.schemas` / `constella.data.models` — dataclasses that capture reproducible configuration and output artefacts.
 - `scripts.quora_analysis_pipeline` — CLI runner for the Quora dataset that saves cluster assignments and reports generated artifacts.
@@ -30,7 +32,8 @@ Processing tens of thousands of content units for auto-grouping and auto-labelin
 2. The Fireworks provider (or a configured alternative) embeds the texts using LiteLLM with CPU-bound batching and token budgeting.
 3. Candidate cluster sizes are evaluated with silhouette, elbow, and Davies–Bouldin heuristics before selecting the final `k`.
 4. A seeded K-Means run produces cluster assignments.
-5. If visualization is enabled, embeddings are projected with UMAP and saved to disk as PNG and/or D3.js-based interactive HTML artifacts for downstream review.
+5. Call `get_labels` (or pass a `LabelingConfig` to `cluster_texts`) to obtain structured auto-labels using LiteLLM OpenAI. It uses representative sampling to extract centroid-aligned plus diverse examples per cluster.
+6. If visualization is enabled, embeddings are projected with UMAP and saved to disk as PNG and/or D3.js-based interactive HTML artifacts for downstream review.
 
 ## Advantages
 
@@ -53,10 +56,16 @@ Processing tens of thousands of content units for auto-grouping and auto-labelin
 ```bash
 pip install -e .
 
-# Choose one of the supported providers
+# Fireworks AI API key needed for embedding step
 export FIREWORKS_AI_API_KEY="your-fireworks-key"
-# or
+
+
+# Auto labelling step uses LiteLLM to connect with any model.
+# The example model for auto labelling uses OpenAI model.
+# OpenAI API key is required for example model.
+# If any other model you want to use for auto-labeling step, you can change the labeling configuration, and provide related Model API Key. 
 export OPENAI_API_KEY="sk-your-openai-key"
+
 ```
 
 To run the tests locally:
@@ -82,16 +91,17 @@ units = ContentUnitCollection([
     ContentUnit(identifier="doc_3", text="Third document", metadata1={"source": "faq"}),
 ])
 
+# Calling clustering workflow with default settings
+collection = cluster_texts(units)
+
+# Calling clustering workflow with explicit parameters
 collection = cluster_texts(
     units,
     clustering_config=ClusteringConfig(
         fallback_n_clusters=2,
-        silhouette_sample_size=64,
-        seed=8,
     ),
     visualization_config=VisualizationConfig(
         output_path=Path("/tmp/constella/umap.png"),
-        random_state=8,
     ),
     embedding_provider=LiteLLMEmbeddingFireworksProvider(),
 )
@@ -107,3 +117,26 @@ if collection.artifacts:
     print("Interactive visualization:", artifacts.html_plot)
 ```
 `collection` contains cluster assignments on each `ContentUnit`, along with an optional `ClusteringMetrics` snapshot and any generated `VisualizationArtifacts` paths.
+
+To auto-label the resulting clusters, sample representatives and invoke the labelling helper:
+
+```python
+from constella.config.schemas import LabelingConfig, RepresentativeSelectionConfig
+from constella.labeling.selection import select_representatives
+from constella.labeling.llm import get_labels
+
+# sample up to 20 representatives per cluster before labelling
+select_config = RepresentativeSelectionConfig(n_representatives=20, core_ratio=0.6)
+select_representatives(collection, select_config)
+
+label_config = LabelingConfig(
+    model="gpt-4o-mini",
+    temperature=0.1,
+)
+
+labels = get_labels(collection, label_config)
+for cluster_id, result in labels.items():
+    print(cluster_id, result.label, result.confidence)
+```
+
+`get_labels` defaults to the OpenAI LiteLLM provider; ensure `OPENAI_API_KEY` is set before calling it. Each `LabelResult` supplies the cluster label, explanation, confidence score, and associated keywords.

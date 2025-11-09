@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -37,27 +38,38 @@ def project_embeddings(
     if array.ndim != 2 or array.shape[0] < 2:
         raise ValueError("Need at least two embeddings for UMAP projection.")
 
-    reducer = umap.UMAP(
-        n_neighbors=config.n_neighbors,
-        min_dist=config.min_dist,
-        random_state=config.random_state,
-    )
+    reducer_kwargs = {
+        "n_neighbors": config.n_neighbors,
+        "min_dist": config.min_dist,
+        "random_state": config.random_state,
+    }
+    if config.random_state is not None:
+        try:
+            umap_signature = inspect.signature(umap.UMAP)
+        except (TypeError, ValueError):
+            umap_signature = None
+        if umap_signature and "n_jobs" in umap_signature.parameters:
+            reducer_kwargs["n_jobs"] = 1
+
+    reducer = umap.UMAP(**reducer_kwargs)
     LOGGER.info("Generating UMAP projection for %s embeddings", array.shape[0])
     return reducer.fit_transform(array)
 
 
 def save_umap_plot(
     projection: np.ndarray,
-    labels: Sequence[int],
+    labels: Sequence[str],
     config: VisualizationConfig,
+    *,
     title: Optional[str] = None,
+    artifact_dir: Path,
 ) -> Path:
     """Persist a scatter plot of the UMAP projection."""
 
     if projection.shape[1] != 2:
         raise ValueError("Projection must have exactly two dimensions for plotting.")
 
-    unique_labels = sorted({int(label) for label in labels})
+    unique_labels = list(dict.fromkeys(labels))
     if len(unique_labels) <= 10:
         cmap_name = "tab10"
     elif len(unique_labels) <= 20:
@@ -74,27 +86,29 @@ def save_umap_plot(
         }
     else:
         color_lookup = {}
-    point_colors = [color_lookup.get(int(label), "#1f77b4") for label in labels]
+    point_colors = [color_lookup.get(label, "#1f77b4") for label in labels]
 
-    output_path = Path(config.output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_dir = Path(artifact_dir)
+    resolved_dir.mkdir(parents=True, exist_ok=True)
+    output_path = resolved_dir / "umap.png"
 
     LOGGER.info("Saving UMAP plot to %s", output_path)
     plt.figure(figsize=(8, 6))
     scatter = plt.scatter(projection[:, 0], projection[:, 1], c=point_colors, s=20)
     if unique_labels:
-        legend_handles = [
-            plt.Line2D(
-                [0],
-                [0],
-                marker="o",
-                linestyle="",
-                markerfacecolor=color_lookup[label_value],
-                markeredgecolor=color_lookup[label_value],
-                label=str(label_value),
+        legend_handles = []
+        for label_value in unique_labels:
+            legend_handles.append(
+                plt.Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="",
+                    markerfacecolor=color_lookup[label_value],
+                    markeredgecolor=color_lookup[label_value],
+                    label=str(label_value),
+                )
             )
-            for label_value in unique_labels
-        ]
         plt.legend(handles=legend_handles, title="Cluster", fontsize="small", loc="best")
     if title:
         plt.title(title)
@@ -119,13 +133,15 @@ def _truncate_text_lines(text: str, max_lines: int) -> str:
 
 def create_umap_plot_html(
     projection: np.ndarray,
-    labels: Sequence[int],
+    labels: Sequence[str],
     config: VisualizationConfig,
     units: Sequence[ContentUnit],
+    *,
     title: Optional[str] = None,
-    output_path: Optional[Path] = None
+    artifact_dir: Path,
 ) -> Path:
-    """Persist an interactive HTML scatter plot with hover tooltips."""
+    """Persist an interactive HTML scatter plot with hover tooltips.
+    """
 
     if projection.ndim != 2 or projection.shape[1] != 2:
         raise ValueError("Projection must be a 2D array with two columns.")
@@ -136,17 +152,18 @@ def create_umap_plot_html(
     if len(units) != projection.shape[0]:
         raise ValueError("Number of content units must match projection rows.")
 
-    target_path = Path(output_path) if output_path else Path(config.output_path)
-    if target_path.suffix.lower() != ".html":
-        target_path = target_path.with_suffix(".html")
-    target_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_labels = list(labels)
+
+    resolved_dir = Path(artifact_dir)
+    resolved_dir.mkdir(parents=True, exist_ok=True)
+    target_path = resolved_dir / "umap.html"
 
     normalized_meta = [
         {"identifier": unit.identifier, "text": unit.get_content()}
         for unit in units
     ]
 
-    unique_labels = sorted({int(label) for label in labels})
+    unique_labels = list(dict.fromkeys(resolved_labels))
     cmap = colormaps.get_cmap("Spectral")
     if unique_labels:
         if len(unique_labels) == 1:
@@ -161,14 +178,15 @@ def create_umap_plot_html(
         color_lookup = {}
 
     points = []
-    for coords, label, meta in zip(projection, labels, normalized_meta):
-        label_value = int(label)
+    for coords, label, meta, unit in zip(projection, resolved_labels, normalized_meta, units):
+        cluster_id = unit.cluster_id if unit.cluster_id is not None else None
         points.append(
             {
                 "x": float(coords[0]),
                 "y": float(coords[1]),
-                "label": label_value,
-                "color": color_lookup.get(label_value, "#1f77b4"),
+                "label": str(label),
+                "cluster_id": cluster_id,
+                "color": color_lookup.get(label, "#1f77b4"),
                 "identifier": meta["identifier"],
                 "text": meta["text"],
             }
@@ -187,13 +205,12 @@ def create_umap_plot_html(
     data_json = json.dumps(points, ensure_ascii=False, indent=2)
     title_json = json.dumps(title or "UMAP Projection", ensure_ascii=False)
 
-    data_script_path = target_path.with_name(f"{target_path.stem}_data.js")
+    data_script_path = resolved_dir / "umap_data.js"
 
     preview_points = points[: min(len(points), 5)]
     preview_json = json.dumps(preview_points, ensure_ascii=False).replace("</", "<\\/")
 
     html_content = build_umap_hover_html(
-        data_script_path=data_script_path.name,
         title_json=title_json,
         width=width,
         height=height,
