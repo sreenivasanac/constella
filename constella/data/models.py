@@ -193,6 +193,28 @@ class ContentUnitCollection(MutableSequence[ContentUnit]):
         self._attach_sequence(cluster_ids, _assign, "cluster IDs")
 
     @property
+    def unique_cluster_ids(self) -> List[int]:
+        """Return sorted unique cluster identifiers present among units."""
+
+        unique: set[int] = set()
+        for unit in self._units:
+            cid = unit.cluster_id
+            if cid is None:
+                continue
+            try:
+                unique.add(int(cid))
+            except (TypeError, ValueError):
+                continue
+        return sorted(unique)
+
+    @property
+    def unique_cluster_labels(self) -> List[str]:
+        """Return visual labels corresponding to the unique cluster identifiers."""
+
+        unique_cluster_ids = self.unique_cluster_ids
+        return [self.get_visual_label_for_cluster_id(cid) for cid in unique_cluster_ids]
+
+    @property
     def representatives(self) -> Dict[int, List[RepresentativeSample]]:
         return self._representatives
 
@@ -214,6 +236,8 @@ class ContentUnitCollection(MutableSequence[ContentUnit]):
         setter: Callable[[ContentUnit, Any], None],
         label: str,
     ) -> None:
+        """Apply values to units via *setter*, enforcing a one-to-one pairing."""
+
         iterator = iter(values)
         for unit in self._units:
             try:
@@ -227,6 +251,8 @@ class ContentUnitCollection(MutableSequence[ContentUnit]):
 
     @property
     def cluster_size_lookup(self) -> Dict[int, int]:
+        """Count units per cluster id, ignoring units without valid assignments."""
+
         sizes: Dict[int, int] = {}
         for unit in self._units:
             cid = unit.cluster_id
@@ -255,9 +281,33 @@ class ContentUnitCollection(MutableSequence[ContentUnit]):
             return label_result.label.strip()
         return f"Cluster {lookup_id}"
 
+    def iter_visual_labels(self) -> List[str]:
+        """Resolve display labels for every unit in the collection."""
+
+        target_units = list(self._units)
+        label_lookup = dict(zip(self.unique_cluster_ids, self.unique_cluster_labels))
+        default_label = self.get_visual_label_for_cluster_id(None)
+        resolved: List[str] = []
+        for unit in target_units:
+            cid = unit.cluster_id
+            if cid is None:
+                resolved.append(default_label)
+                continue
+            try:
+                lookup_id = int(cid)
+            except (TypeError, ValueError):
+                resolved.append(default_label)
+                continue
+            resolved.append(
+                label_lookup.get(lookup_id, self.get_visual_label_for_cluster_id(lookup_id))
+            )
+        return resolved
+
     @property
     def visual_labels(self) -> List[str]:
-        return [self.get_visual_label_for_cluster_id(unit.cluster_id) for unit in self._units]
+        """Return display labels aligned with ``units()`` ordering."""
+
+        return self.iter_visual_labels()
 
 
 __all__ = [

@@ -21,7 +21,7 @@ from streamlit.components.v1 import html as st_html
 import umap  # type: ignore
 
 from constella.config.schemas import VisualizationConfig
-from constella.data.models import ContentUnit
+from constella.data.models import ContentUnit, ContentUnitCollection
 from constella.visualization.html_templates import build_umap_hover_html
 
 
@@ -58,7 +58,7 @@ def project_embeddings(
 
 def save_umap_plot(
     projection: np.ndarray,
-    labels: Sequence[str],
+    collection: ContentUnitCollection,
     config: VisualizationConfig,
     *,
     title: Optional[str] = None,
@@ -69,24 +69,32 @@ def save_umap_plot(
     if projection.shape[1] != 2:
         raise ValueError("Projection must have exactly two dimensions for plotting.")
 
-    unique_labels = list(dict.fromkeys(labels))
-    if len(unique_labels) <= 10:
+    units = collection.units()
+    if projection.shape[0] != len(units):
+        raise ValueError("Number of projection rows must match content units.")
+
+    resolved_labels = collection.iter_visual_labels()
+    if len(resolved_labels) != projection.shape[0]:
+        raise ValueError("Number of labels must match projection rows.")
+    ordered_labels = list(dict.fromkeys(resolved_labels))
+
+    if len(ordered_labels) <= 10:
         cmap_name = "tab10"
-    elif len(unique_labels) <= 20:
+    elif len(ordered_labels) <= 20:
         cmap_name = "tab20"
     else:
         cmap_name = "gist_ncar"
 
     base_cmap = colormaps.get_cmap(cmap_name)
-    if unique_labels:
-        samples = np.linspace(0.0, 1.0, len(unique_labels), endpoint=False)
+    if ordered_labels:
+        samples = np.linspace(0.0, 1.0, len(ordered_labels), endpoint=False)
         color_lookup = {
             label_value: colors.to_hex(base_cmap(sample))
-            for label_value, sample in zip(unique_labels, samples)
+            for label_value, sample in zip(ordered_labels, samples)
         }
     else:
         color_lookup = {}
-    point_colors = [color_lookup.get(label, "#1f77b4") for label in labels]
+    point_colors = [color_lookup.get(label, "#1f77b4") for label in resolved_labels]
 
     resolved_dir = Path(artifact_dir)
     resolved_dir.mkdir(parents=True, exist_ok=True)
@@ -94,10 +102,10 @@ def save_umap_plot(
 
     LOGGER.info("Saving UMAP plot to %s", output_path)
     plt.figure(figsize=(8, 6))
-    scatter = plt.scatter(projection[:, 0], projection[:, 1], c=point_colors, s=20)
-    if unique_labels:
+    plt.scatter(projection[:, 0], projection[:, 1], c=point_colors, s=20)
+    if ordered_labels:
         legend_handles = []
-        for label_value in unique_labels:
+        for label_value in ordered_labels:
             legend_handles.append(
                 plt.Line2D(
                     [0],
@@ -133,9 +141,8 @@ def _truncate_text_lines(text: str, max_lines: int) -> str:
 
 def create_umap_plot_html(
     projection: np.ndarray,
-    labels: Sequence[str],
+    collection: ContentUnitCollection,
     config: VisualizationConfig,
-    units: Sequence[ContentUnit],
     *,
     title: Optional[str] = None,
     artifact_dir: Path,
@@ -147,12 +154,14 @@ def create_umap_plot_html(
         raise ValueError("Projection must be a 2D array with two columns.")
     if projection.shape[0] == 0:
         raise ValueError("Need at least one embedding to render the HTML plot.")
-    if len(labels) != projection.shape[0]:
-        raise ValueError("Number of labels must match projection rows.")
+    units = collection.units()
     if len(units) != projection.shape[0]:
         raise ValueError("Number of content units must match projection rows.")
 
-    resolved_labels = list(labels)
+    resolved_labels = collection.iter_visual_labels()
+    if len(resolved_labels) != projection.shape[0]:
+        raise ValueError("Number of labels must match projection rows.")
+    ordered_labels = list(dict.fromkeys(resolved_labels))
 
     resolved_dir = Path(artifact_dir)
     resolved_dir.mkdir(parents=True, exist_ok=True)
@@ -163,16 +172,15 @@ def create_umap_plot_html(
         for unit in units
     ]
 
-    unique_labels = list(dict.fromkeys(resolved_labels))
     cmap = colormaps.get_cmap("Spectral")
-    if unique_labels:
-        if len(unique_labels) == 1:
+    if ordered_labels:
+        if len(ordered_labels) == 1:
             samples = [0.5]
         else:
-            samples = np.linspace(0.0, 1.0, len(unique_labels))
+            samples = np.linspace(0.0, 1.0, len(ordered_labels))
         color_lookup = {
             label_value: colors.to_hex(cmap(sample))
-            for label_value, sample in zip(unique_labels, samples)
+            for label_value, sample in zip(ordered_labels, samples)
         }
     else:
         color_lookup = {}

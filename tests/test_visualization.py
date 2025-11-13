@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 
 from constella.config.schemas import VisualizationConfig
-from constella.data.models import ContentUnit
+from constella.data.models import ContentUnit, ContentUnitCollection
+from constella.data.results import LabelResult
 from constella.visualization.umap import create_umap_plot_html, project_embeddings, save_umap_plot
 
 
@@ -24,10 +25,15 @@ def test_project_embeddings_shape(tmp_path):
 
 def test_save_umap_plot_creates_file(tmp_path):
     projection = np.array([[0.0, 0.0], [1.0, 1.0]])
-    labels = ["Cluster 0", "Cluster 1"]
+    collection = ContentUnitCollection(
+        [
+            ContentUnit(identifier="a", text="alpha", cluster_id=0),
+            ContentUnit(identifier="b", text="beta", cluster_id=1),
+        ]
+    )
     config = VisualizationConfig(output_path=tmp_path, random_state=7)
     artifact_dir = tmp_path / "artifacts_run"
-    path = save_umap_plot(projection, labels, config, artifact_dir=artifact_dir)
+    path = save_umap_plot(projection, collection, config, artifact_dir=artifact_dir)
 
     assert path == artifact_dir / "umap.png"
     assert path.exists()
@@ -35,26 +41,31 @@ def test_save_umap_plot_creates_file(tmp_path):
 
 def test_create_umap_plot_html_generates_hoverable_artifact(tmp_path):
     projection = np.array([[0.0, 0.0], [1.0, 1.0]])
-    labels = ["Alpha Topics", "Beta Topics"]
-    units = [
-        ContentUnit(
-            identifier="unit_a",
-            text="alpha",
-            title="Title A",
-            name="Name A",
-            path="/path/a",
-            size="120 chars",
-        ),
-        ContentUnit(identifier="unit_b", text="beta", title="Title B"),
-    ]
+    collection = ContentUnitCollection(
+        [
+            ContentUnit(
+                identifier="unit_a",
+                text="alpha",
+                title="Title A",
+                name="Name A",
+                path="/path/a",
+                size="120 chars",
+                cluster_id=0,
+            ),
+            ContentUnit(identifier="unit_b", text="beta", title="Title B", cluster_id=1),
+        ]
+    )
+    collection.label_results = {
+        0: LabelResult(cluster_id=0, label="Alpha Topics", explanation="", confidence=0.9),
+        1: LabelResult(cluster_id=1, label="Beta Topics", explanation="", confidence=0.8),
+    }
     config = VisualizationConfig(output_path=tmp_path, random_state=7)
     artifact_dir = tmp_path / "artifacts_run"
 
     html_path = create_umap_plot_html(
         projection,
-        labels,
+        collection,
         config,
-        units,
         title="Sample",
         artifact_dir=artifact_dir,
     )
@@ -77,12 +88,16 @@ def test_create_umap_plot_html_generates_hoverable_artifact(tmp_path):
 
 def test_create_umap_plot_html_validates_lengths(tmp_path):
     projection = np.array([[0.0, 0.0]])
-    labels = ["Cluster 0", "Cluster 1"]
-    units = [ContentUnit(identifier="x", text="x-text"), ContentUnit(identifier="y", text="y-text")]
+    collection = ContentUnitCollection(
+        [
+            ContentUnit(identifier="x", text="x-text", cluster_id=0),
+            ContentUnit(identifier="y", text="y-text", cluster_id=1),
+        ]
+    )
     config = VisualizationConfig(output_path=tmp_path, random_state=7)
 
     with pytest.raises(ValueError):
-        create_umap_plot_html(projection, labels, config, units, artifact_dir=tmp_path)
+        create_umap_plot_html(projection, collection, config, artifact_dir=tmp_path)
 
 
 

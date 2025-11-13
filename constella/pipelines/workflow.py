@@ -66,12 +66,11 @@ def generate_visualization(
     """Project embeddings and persist both static and interactive visualizations."""
 
     embeddings = collection.embedding_matrix()
-    labels = collection.visual_labels
     projection = project_embeddings(embeddings, config)
 
     static_path = save_umap_plot(
         projection,
-        labels,
+        collection,
         config,
         title=title,
         artifact_dir=artifact_dir,
@@ -79,9 +78,8 @@ def generate_visualization(
 
     html_path = create_umap_plot_html(
         projection,
-        labels,
+        collection,
         config,
-        units=collection.units(),
         title=title,
         artifact_dir=artifact_dir,
     )
