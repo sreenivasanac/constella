@@ -21,3 +21,7 @@ https://scikit-learn.org/stable/modules/generated/sklearn.metrics.davies_bouldin
 https://www.geeksforgeeks.org/machine-learning/davies-bouldin-index/
 
 - whenever running python or related scripts (like pytest, pip) - use uv instead of directly running.
+
+The documentation for LiteLLM is given below. Use web search tool or context7 MCP to get LiteLLM BerriAi documentation:
+https://docs.litellm.ai/llms.txt
+https://docs.litellm.ai/llms-full.txt

@@ -1,61 +1,31 @@
-"""LLM-backed auto labeling utilities."""
+"""Automatic cluster labeling via LLM providers."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import litellm
-from pydantic import BaseModel, Field, ValidationError
 
-from constella.labeling.selection import select_representatives
 from constella.config.schemas import (
     LabelingConfig,
     RepresentativeSelectionConfig,
 )
 from constella.data.models import ContentUnitCollection
 from constella.data.results import LabelResult, RepresentativeSample
+from constella.labeling.providers import get_provider_config
+from constella.labeling.prompts import build_labeling_messages
+from constella.labeling.response_parsing import (
+    LabelPayload,
+    create_fallback_label,
+    parse_label_response,
+)
+from constella.labeling.selection import select_representatives
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-DEFAULT_SYSTEM_PROMPT = (
-    "You are an analyst categorizing large collections of user content units. "
-    "Each cluster groups semantically similar items, and you will only see a "
-    "handful of representative samples. Infer a concise, human-readable label "
-    "that captures the shared topic."
-)
-
-
-
-class LabelPayload(BaseModel):
-    label: str
-    explanation: str
-    confidence: float
-    keywords: List[str] = Field(default_factory=list)
-
-    def to_label_result(
-        self,
-        *,
-        cluster_id: int,
-        raw_response: Optional[str],
-        usage: Optional[Dict[str, Any]],
-    ) -> LabelResult:
-        bounded_confidence = float(min(1.0, max(0.0, self.confidence)))
-        keywords = [item.strip() for item in self.keywords if item and item.strip()]
-        return LabelResult(
-            cluster_id=cluster_id,
-            label=self.label.strip() or f"Cluster {cluster_id}",
-            explanation=self.explanation.strip() or "Automatic labeling failed",
-            confidence=bounded_confidence,
-            keywords=keywords,
-            raw_response=raw_response,
-            usage_metadata=usage,
-        )
 
 
 def auto_label_clusters(
@@ -63,8 +33,41 @@ def auto_label_clusters(
     config: Optional[LabelingConfig] = None,
     selection_config: Optional[RepresentativeSelectionConfig] = None,
 ) -> ContentUnitCollection:
-    """Populate label results on the collection using the provided configuration."""
-
+    """Automatically generate labels for clusters using LLM.
+    
+    Selects representative samples from each cluster and uses an LLM to generate
+    concise, human-readable labels with explanations and keywords. Results are
+    attached to the collection's label_results attribute.
+    
+    Args:
+        collection: Content units with cluster assignments. Must have embeddings
+            and cluster_id populated for each unit.
+        config: LLM provider and generation settings. Defaults to OpenAI gpt-4o-mini
+            if not provided.
+        selection_config: Controls representative sampling strategy (core ratio,
+            diversity, etc.). Uses defaults if not provided.
+    
+    Returns:
+        The same collection with label_results populated as a dict mapping
+        cluster_id to LabelResult objects.
+    
+    Raises:
+        RuntimeError: If the configured provider's API key is not set in environment.
+    
+    Examples:
+        >>> from constella.data.models import ContentUnitCollection, ContentUnit
+        >>> from constella.config.schemas import LabelingConfig
+        >>> 
+        >>> collection = ContentUnitCollection([
+        ...     ContentUnit(id="1", text="Python tutorial", cluster_id=0),
+        ...     ContentUnit(id="2", text="JavaScript guide", cluster_id=1),
+        ... ])
+        >>> # Assume embeddings and clustering already done
+        >>> 
+        >>> config = LabelingConfig(model="gpt-4o-mini", async_mode=True)
+        >>> labeled = auto_label_clusters(collection, config)
+        >>> print(labeled.label_results[0].label)
+    """
     if len(collection) == 0:
         collection.label_results = {}
         return collection
@@ -79,7 +82,7 @@ def auto_label_clusters(
         return collection
 
     cluster_sizes = collection.cluster_size_lookup
-    provider_kwargs = _provider_kwargs(resolved_config.llm_provider)
+    provider_kwargs = get_provider_config(resolved_config.llm_provider)
 
     jobs: List[Tuple[int, List[RepresentativeSample]]] = []
     for cluster_id, samples in representatives.items():
@@ -121,10 +124,27 @@ def _execute_sync_labeling(
     provider_kwargs: Dict[str, Any],
     cluster_sizes: Dict[int, int],
 ) -> Dict[int, LabelResult]:
+    """Execute labeling requests synchronously for all clusters.
+    
+    Processes each cluster sequentially, making blocking LLM API calls. Suitable
+    for small datasets or when async execution is not desired.
+    
+    Args:
+        jobs: Iterable of (cluster_id, samples) tuples to process.
+        collection: Content unit collection for accessing unit data.
+        config: Labeling configuration with model and retry settings.
+        provider_kwargs: Provider-specific API configuration.
+        cluster_sizes: Mapping of cluster_id to total cluster size.
+    
+    Returns:
+        Dictionary mapping cluster_id to LabelResult.
+    """
     results: Dict[int, LabelResult] = {}
 
     for cluster_id, samples in jobs:
-        messages = _build_messages(collection, cluster_id, samples, cluster_sizes.get(cluster_id, len(samples)), config)
+        messages = build_labeling_messages(
+            collection, cluster_id, samples, cluster_sizes.get(cluster_id, len(samples)), config
+        )
         result = _label_cluster_sync(cluster_id, messages, config, provider_kwargs)
         results[cluster_id] = result
 
@@ -138,6 +158,22 @@ def _execute_async_labeling(
     provider_kwargs: Dict[str, Any],
     cluster_sizes: Dict[int, int],
 ) -> Dict[int, LabelResult]:
+    """Execute labeling requests asynchronously with concurrency control.
+    
+    Processes multiple clusters concurrently using asyncio, with a semaphore
+    limiting concurrent requests. Falls back to synchronous execution if an
+    event loop is already active.
+    
+    Args:
+        jobs: Iterable of (cluster_id, samples) tuples to process.
+        collection: Content unit collection for accessing unit data.
+        config: Labeling configuration with concurrency and retry settings.
+        provider_kwargs: Provider-specific API configuration.
+        cluster_sizes: Mapping of cluster_id to total cluster size.
+    
+    Returns:
+        Dictionary mapping cluster_id to LabelResult.
+    """
     jobs = list(jobs)
 
     async def _runner() -> Dict[int, LabelResult]:
@@ -145,7 +181,7 @@ def _execute_async_labeling(
         tasks = []
 
         for cluster_id, samples in jobs:
-            messages = _build_messages(
+            messages = build_labeling_messages(
                 collection,
                 cluster_id,
                 samples,
@@ -186,6 +222,20 @@ def _label_cluster_sync(
     config: LabelingConfig,
     provider_kwargs: Dict[str, Any],
 ) -> LabelResult:
+    """Generate label for a single cluster using synchronous LLM call.
+    
+    Makes a blocking call to the LLM API with retry logic and exponential backoff.
+    Returns a fallback label if all retry attempts fail.
+    
+    Args:
+        cluster_id: Identifier for the cluster being labeled.
+        messages: Chat messages containing system prompt and user prompt.
+        config: Configuration with model, temperature, and retry settings.
+        provider_kwargs: Provider-specific API parameters.
+    
+    Returns:
+        LabelResult with generated label or fallback values on failure.
+    """
     delay = max(0.0, config.retry_backoff_seconds[0])
 
     for attempt in range(1, config.max_retries + 1):
@@ -199,7 +249,7 @@ def _label_cluster_sync(
                 **provider_kwargs,
             )
             response_dict = _coerce_response_to_dict(response)
-            return _parse_label_response(cluster_id, response_dict)
+            return parse_label_response(cluster_id, response_dict)
         except Exception as exc:  # pragma: no cover - upstream errors vary
             LOGGER.warning(
                 "Labeling attempt %s for cluster %s failed: %s",
@@ -213,7 +263,7 @@ def _label_cluster_sync(
             delay = min(delay * 2, config.retry_backoff_seconds[1])
 
     LOGGER.error("All labeling attempts failed for cluster %s; returning fallback label.", cluster_id)
-    return _fallback_label(cluster_id)
+    return create_fallback_label(cluster_id)
 
 
 async def _label_cluster_async(
@@ -223,6 +273,22 @@ async def _label_cluster_async(
     provider_kwargs: Dict[str, Any],
     semaphore: asyncio.Semaphore,
 ) -> Tuple[int, LabelResult]:
+    """Generate label for a single cluster using asynchronous LLM call.
+    
+    Makes a non-blocking async call to the LLM API with retry logic and exponential
+    backoff. Uses a semaphore to limit concurrent requests. Returns a fallback
+    label if all retry attempts fail.
+    
+    Args:
+        cluster_id: Identifier for the cluster being labeled.
+        messages: Chat messages containing system prompt and user prompt.
+        config: Configuration with model, temperature, and retry settings.
+        provider_kwargs: Provider-specific API parameters.
+        semaphore: Asyncio semaphore controlling concurrency.
+    
+    Returns:
+        Tuple of (cluster_id, LabelResult) for result aggregation.
+    """
     delay = max(0.0, config.retry_backoff_seconds[0])
 
     async with semaphore:
@@ -237,7 +303,7 @@ async def _label_cluster_async(
                     **provider_kwargs,
                 )
                 response_dict = _coerce_response_to_dict(response)
-                return cluster_id, _parse_label_response(cluster_id, response_dict)
+                return cluster_id, parse_label_response(cluster_id, response_dict)
             except Exception as exc:  # pragma: no cover - upstream errors vary
                 LOGGER.warning(
                     "Async labeling attempt %s for cluster %s failed: %s",
@@ -251,150 +317,21 @@ async def _label_cluster_async(
                 delay = min(delay * 2, config.retry_backoff_seconds[1])
 
     LOGGER.error("Async labeling exhausted retries for cluster %s; returning fallback.", cluster_id)
-    return cluster_id, _fallback_label(cluster_id)
+    return cluster_id, create_fallback_label(cluster_id)
 
-
-def _build_messages(
-    collection: ContentUnitCollection,
-    cluster_id: int,
-    samples: List[RepresentativeSample],
-    cluster_size: int,
-    config: LabelingConfig,
-) -> List[Dict[str, Any]]:
-    system_prompt = config.system_prompt_override or DEFAULT_SYSTEM_PROMPT
-    avg_similarity = sum(sample.similarity for sample in samples) / max(1, len(samples))
-
-    lines: List[str] = [
-        f"Cluster ID: {cluster_id}",
-        f"Total content units: {cluster_size}",
-        f"Average representative similarity: {avg_similarity:.3f}",
-        "Representative content units:",
-    ]
-
-    for idx, sample in enumerate(samples, start=1):
-        unit = collection[sample.unit_index]
-        content_view = unit.get_content(max_char_to_truncate=config.max_chars_per_rep)
-        lines.append(
-            f"{idx}. Core sample: {str(sample.is_core).lower()} | "
-            f"Similarity: {sample.similarity:.3f} | Unit Index: {sample.unit_index}"
-        )
-        lines.append(content_view)
-
-    lines.append("\nInstructions:")
-    lines.extend(
-        [
-            "- Provide a concise label (<= 5 words) describing the common topic.",
-            "- Provide a 1-2 sentence explanation referencing recurring ideas.",
-            "- Output a confidence between 0 and 1.",
-            "- List up to five keywords or short phrases capturing the theme.",
-            "Respond using the structured format with fields: label, explanation, confidence, keywords.",
-        ]
-    )
-
-    user_prompt = "\n".join(lines)
-
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-def _provider_kwargs(provider: str) -> Dict[str, Any]:
-    provider_normalized = (provider or "").lower()
-    if provider_normalized == "openai":
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "OpenAI provider selected but OPENAI_API_KEY is not set."
-            )
-        return {
-            "api_key": api_key,
-            "custom_llm_provider": "openai",
-        }
-    if provider_normalized == "fireworks":
-        api_key = os.environ.get("FIREWORKS_AI_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "Fireworks provider selected but FIREWORKS_AI_API_KEY or FIREWORKS_API_KEY is not set."
-            )
-        api_base = os.environ.get("FIREWORKS_AI_API_BASE", "https://api.fireworks.ai/inference/v1")
-        return {
-            "api_key": api_key,
-            "api_base": api_base,
-            "custom_llm_provider": "openai",
-        }
-    return {}
-
-
-def _parse_label_response(cluster_id: int, response: Dict[str, Any]) -> LabelResult:
-    choice = _first_choice(response)
-    if not choice:
-        LOGGER.error("No completion choices returned for cluster %s", cluster_id)
-        return _fallback_label(cluster_id)
-
-    message = choice.get("message", {})
-    parsed_payload = message.get("parsed")
-    raw_content = message.get("content")
-
-    payload: Optional[LabelPayload]
-    if isinstance(parsed_payload, LabelPayload):
-        payload = parsed_payload
-    elif parsed_payload is not None:
-        try:
-            payload = LabelPayload.model_validate(parsed_payload)
-        except ValidationError as exc:
-            LOGGER.warning(
-                "Structured output validation failed for cluster %s: %s",
-                cluster_id,
-                exc,
-            )
-            return _fallback_label(cluster_id, raw_response=raw_content)
-    else:
-        try:
-            payload = LabelPayload.model_validate_json(raw_content or "{}")
-        except (ValidationError, TypeError, ValueError) as exc:
-            LOGGER.warning(
-                "Structured response missing for cluster %s; using fallback (%s)",
-                cluster_id,
-                exc,
-            )
-            return _fallback_label(cluster_id, raw_response=raw_content)
-
-    serialized = raw_content
-    if serialized is None:
-        try:
-            serialized = payload.model_dump_json()
-        except Exception:  # pragma: no cover - best effort serialization
-            serialized = None
-
-    return payload.to_label_result(
-        cluster_id=cluster_id,
-        raw_response=serialized,
-        usage=response.get("usage"),
-    )
-
-
-def _fallback_label(cluster_id: int, raw_response: Optional[str] = None) -> LabelResult:
-    return LabelResult(
-        cluster_id=cluster_id,
-        label=f"Cluster {cluster_id}",
-        explanation="Automatic labeling failed",
-        confidence=0.0,
-        keywords=[],
-        raw_response=raw_response,
-        usage_metadata=None,
-    )
-
-
-def _first_choice(response: Dict[str, Any]) -> Dict[str, Any]:
-    choices = response.get("choices")
-    if isinstance(choices, list) and choices:
-        choice = choices[0]
-        if isinstance(choice, dict):
-            return choice
-    return {}
 
 def _coerce_response_to_dict(response: Any) -> Dict[str, Any]:
+    """Convert various response types to dictionary format.
+    
+    Handles multiple response formats from LiteLLM including dicts, objects with
+    model_dump() or dict() methods, and objects with __dict__ attributes.
+    
+    Args:
+        response: Response object from LiteLLM API call.
+    
+    Returns:
+        Dictionary representation of the response.
+    """
     if isinstance(response, dict):
         return response
     for extractor in (getattr(response, "model_dump", None), getattr(response, "dict", None)):
@@ -409,6 +346,7 @@ def _coerce_response_to_dict(response: Any) -> Dict[str, Any]:
     if isinstance(raw_dict, dict):
         return raw_dict
     return {"raw_response": repr(response)}
+
 
 __all__ = [
     "auto_label_clusters",

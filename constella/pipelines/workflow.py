@@ -23,7 +23,7 @@ from constella.embeddings.adapters import (
     LiteLLMEmbeddingOpenAIProvider,
 )
 from constella.embeddings.base import EmbeddingProvider
-from constella.labeling.llm import auto_label_clusters
+from constella.labeling.auto_label import auto_label_clusters
 from constella.visualization.artifacts import write_labels_artifact
 from constella.visualization.umap import (
     create_umap_plot_html,
