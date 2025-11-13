@@ -32,3 +32,6 @@ test = [
  [tool.setuptools.packages.find]
  where = ["."]
  include = ["constella*"]
+
+[tool.setuptools.package-data]
+"constella.visualization" = ["*.html"]

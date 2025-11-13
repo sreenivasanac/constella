@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import psycopg
 
-from constella.config.schemas import ClusteringConfig, VisualizationConfig
+from constella.config.schemas import ClusteringConfig, LabelingConfig, VisualizationConfig
 from constella.data.models import ContentUnit, ContentUnitCollection
 from constella.pipelines.workflow import run_pipeline as execute_workflow
 
@@ -35,7 +35,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=Path("artifacts/quora_analysis"),
         help="Directory for generated artifacts",
     )
-    parser.add_argument("--umap-filename", default="umap", help="Base name for UMAP outputs")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     return parser.parse_args(argv)
 
@@ -90,13 +89,8 @@ def fetch_content_units(conn: psycopg.Connection, limit: Optional[int] = None) -
     return units
 
 
-def ensure_output_dir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def serialize_assignments(
-    output_dir: Path,
+    artifact_dir: Path,
     collection: ContentUnitCollection,
     config: ClusteringConfig,
 ) -> Path:
@@ -114,11 +108,11 @@ def serialize_assignments(
         "n_clusters": metrics.n_clusters if metrics else None,
         "silhouette_score": metrics.silhouette_score if metrics else None,
         "inertia": metrics.inertia if metrics else None,
-        "centers": metrics.centers if metrics else None,
         "config": asdict(snapshot),
     }
 
-    output_path = output_dir / "clusters.json"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    output_path = artifact_dir / "clusters.json"
     output_path.write_text(_json_dumps(payload), encoding="utf-8")
     LOGGER.info("Saved cluster assignments to %s", output_path)
     return output_path
@@ -127,16 +121,25 @@ def serialize_assignments(
 def _json_dumps(payload: Dict[str, object]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
-
 def _configure_logging(level: str) -> None:
     logging.basicConfig(level=level.upper(), format="%(asctime)s %(levelname)s %(message)s")
 
 
-def _build_configs(args: argparse.Namespace, output_dir: Path) -> Tuple[ClusteringConfig, VisualizationConfig]:
+def _build_configs(args: argparse.Namespace, output_dir: Path) -> Tuple[ClusteringConfig, LabelingConfig, VisualizationConfig]:
     clustering_config = ClusteringConfig()
-    png_path = output_dir / f"{args.umap_filename}.png"
-    viz_config = VisualizationConfig(output_path=png_path)
-    return clustering_config, viz_config
+    label_config = LabelingConfig()
+    viz_config = VisualizationConfig(output_path=output_dir)
+    return clustering_config, label_config, viz_config
+
+
+def _resolve_artifact_directory(collection: ContentUnitCollection, fallback_root: Path) -> Path:
+    artifacts = collection.artifacts
+    if artifacts:
+        for candidate in (artifacts.static_plot, artifacts.html_plot, artifacts.labels_json):
+            if candidate is not None:
+                return Path(candidate).parent
+    LOGGER.warning("No visualization artifacts detected; using fallback directory for assignments")
+    return fallback_root
 
 
 def run_cli_pipeline(args: argparse.Namespace) -> None:
@@ -152,30 +155,27 @@ def run_cli_pipeline(args: argparse.Namespace) -> None:
     if not units:
         raise SystemExit("No data retrieved from quora_answers table.")
 
-    output_dir = ensure_output_dir(args.output_dir)
+    output_dir = args.output_dir
 
     LOGGER.info("Running Constella clustering pipeline")
-    clustering_config, viz_config = _build_configs(args, output_dir)
+    clustering_config, label_config, viz_config = _build_configs(args, output_dir)
 
     LOGGER.info("Running clustering workflow")
     collection = ContentUnitCollection(units)
 
     collection = execute_workflow(
         collection,
-        steps=("embed", "cluster", "visualize"),
+        steps=("embed", "cluster", "label", "visualize"),
         configs={
             "cluster": clustering_config,
+            "label": label_config,
             "visualize": viz_config,
         },
     )
 
-    serialize_assignments(output_dir, collection, clustering_config)
+    artifact_dir = _resolve_artifact_directory(collection, viz_config.output_path)
+    serialize_assignments(artifact_dir, collection, clustering_config)
 
-    artifacts = collection.artifacts
-    if artifacts:
-        for artifact in (artifacts.static_plot, artifacts.html_plot):
-            if artifact is not None and Path(artifact).exists():
-                LOGGER.info("Generated artifact: %s", artifact)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

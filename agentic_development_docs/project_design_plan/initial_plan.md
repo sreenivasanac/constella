@@ -10,7 +10,7 @@ Large text-based collection of content (e.g., 10,000 emails, bookmarks, messages
 1. Compute semantic embeddings for each content-unit (message/email/bookmark/document chunk) of the collection using a parameterized embedding model supplied by the caller.
 2. Cluster the embeddings with K‑Means to group content-units by vector proximity (semantic similarity).
 3. Select cluster representatives (units closest to the centroid) to summarize the group and, if desired, send only these few representatives to an LLM to generate a human‑readable label.
-4. Return cluster assignments, cluster centers, sizes, and representative indices for downstream use.
+4. Return cluster assignments, sizes, and representative indices for downstream use.
 
 Cluster counts can be derived dynamically from the distribution of formed clusters or set manually with the aid of visualization tools.
 

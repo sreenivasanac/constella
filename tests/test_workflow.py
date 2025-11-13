@@ -31,7 +31,7 @@ def test_cluster_texts_with_mock_embeddings(tmp_path: Path):
         enable_elbow_selection=False,
         enable_davies_bouldin_selection=False,
     )
-    viz_config = VisualizationConfig(output_path=tmp_path / "plot.png", random_state=5)
+    viz_config = VisualizationConfig(output_path=tmp_path, random_state=5)
 
     result_collection = cluster_texts(
         collection,
@@ -43,9 +43,14 @@ def test_cluster_texts_with_mock_embeddings(tmp_path: Path):
     artifacts = result_collection.artifacts
     assert artifacts is not None
     assert artifacts.generated is True
+    artifact_parent = Path(artifacts.static_plot).parent
+    assert artifact_parent.parent == tmp_path
+    assert artifact_parent.name.startswith("artifacts_")
+
     for artifact in (artifacts.static_plot, artifacts.html_plot):
         assert artifact is not None
         assert Path(artifact).exists()
+        assert Path(artifact).parent == artifact_parent
     assert [unit.embedding for unit in result_collection] == embeddings.tolist()
     assert len(set(unit.cluster_id for unit in result_collection)) == 2
     assert result_collection.metrics is not None

@@ -3,23 +3,28 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple, cast
+from typing import Dict, List, Optional, Sequence, cast
+from uuid import uuid4
 
 from constella.clustering.kmeans import run_kmeans
 from constella.config.schemas import (
     ClusteringConfig,
     LabelingConfig,
+    RepresentativeSelectionConfig,
     VisualizationConfig,
-    VisualizationArtifacts,
 )
+from constella.labeling.selection import select_representatives
 from constella.data.models import ContentUnitCollection
+from constella.data.results import VisualizationArtifacts
 from constella.embeddings.adapters import (
     LiteLLMEmbeddingFireworksProvider,
     LiteLLMEmbeddingOpenAIProvider,
 )
 from constella.embeddings.base import EmbeddingProvider
 from constella.labeling.llm import auto_label_clusters
+from constella.visualization.artifacts import write_labels_artifact
 from constella.visualization.umap import (
     create_umap_plot_html,
     project_embeddings,
@@ -56,26 +61,32 @@ def generate_visualization(
     config: VisualizationConfig,
     *,
     title: Optional[str] = None,
+    artifact_dir: Path,
 ) -> VisualizationArtifacts:
     """Project embeddings and persist both static and interactive visualizations."""
 
     embeddings = collection.embedding_matrix()
-    labels = collection.cluster_ids()
     projection = project_embeddings(embeddings, config)
 
-    static_path = save_umap_plot(projection, labels, config, title=title)
+    static_path = save_umap_plot(
+        projection,
+        collection,
+        config,
+        title=title,
+        artifact_dir=artifact_dir,
+    )
 
     html_path = create_umap_plot_html(
         projection,
-        labels,
+        collection,
         config,
-        units=collection.units(),
         title=title,
-        output_path=Path(config.output_path).with_suffix(".html"),
+        artifact_dir=artifact_dir,
     )
     return VisualizationArtifacts(
         static_plot=static_path,
         html_plot=html_path,
+        labels_json=None,
     )
 
 
@@ -93,6 +104,25 @@ def run_pipeline(
 
     step_configs = configs or {}
     generated_artifacts: Optional[VisualizationArtifacts] = None
+    artifact_dir: Optional[Path] = None
+
+    def _ensure_artifact_dir(preferred_config: Optional[VisualizationConfig] | object = None) -> Path:
+        nonlocal artifact_dir
+        if artifact_dir is not None:
+            return artifact_dir
+
+        base_config: VisualizationConfig
+        if isinstance(preferred_config, VisualizationConfig):
+            base_config = preferred_config
+        else:
+            candidate = step_configs.get("visualize")
+            if isinstance(candidate, VisualizationConfig):
+                base_config = candidate
+            else:
+                base_config = VisualizationConfig()
+
+        artifact_dir = _create_artifact_run_directory(base_config.output_path)
+        return artifact_dir
 
     def _run_embed() -> None:
         provider = _resolve_embedding_provider(step_configs.get("embed"))
@@ -103,29 +133,46 @@ def run_pipeline(
         run_kmeans(collection, cluster_cfg)
 
     def _run_label() -> None:
-        label_params = step_configs.get("label")
-        if label_params is None:
-            raise ValueError("Labeling step requires configuration")
-        label_cfg, provider_name = cast(Tuple[Optional[LabelingConfig], str], label_params)
-        auto_label_clusters(collection, provider_name, label_cfg)
+        label_config = step_configs.get("label")
+        selection_override = step_configs.get("representative_selection")
+
+        if label_config and not isinstance(label_config, LabelingConfig):
+            raise TypeError("Labeling step configuration must be a LabelingConfig instance")
+
+        if selection_override and not isinstance(selection_override, RepresentativeSelectionConfig):
+            raise TypeError("Representative selection configuration must be a RepresentativeSelectionConfig instance")
+
+        resolved_label_config = cast(LabelingConfig, label_config) if label_config else LabelingConfig()
+        resolved_selection_config = cast(Optional[RepresentativeSelectionConfig], selection_override)
+
+        auto_label_clusters(collection, resolved_label_config, resolved_selection_config)
+
+        if collection.label_results:
+            directory = _ensure_artifact_dir(step_configs.get("visualize"))
+            label_path = write_labels_artifact(collection.label_results, directory)
+            if collection.artifacts:
+                collection.artifacts.labels_json = label_path
+            else:
+                collection.artifacts = VisualizationArtifacts(labels_json=label_path)
 
     def _run_visualize() -> None:
         viz_cfg = step_configs.get("visualize")
         if viz_cfg is None:
             raise ValueError("Visualization step requires configuration")
+        visualization_config = cast(VisualizationConfig, viz_cfg)
+        directory = _ensure_artifact_dir(visualization_config)
+        existing_artifacts = collection.artifacts
         generated_artifacts = generate_visualization(
             collection,
-            cast(VisualizationConfig, viz_cfg),
+            visualization_config,
+            artifact_dir=directory,
         )
-        if generated_artifacts.generated:
-            LOGGER.info(
-                "Generated visualization artifacts: static=%s, html=%s",
-                generated_artifacts.static_plot,
-                generated_artifacts.html_plot,
-            )
+        if existing_artifacts and existing_artifacts.labels_json:
+            generated_artifacts.labels_json = existing_artifacts.labels_json
+
+        if generated_artifacts.generated or generated_artifacts.labels_json:
             collection.artifacts = generated_artifacts
         else:
-            LOGGER.info("Visualization step completed but produced no persisted artifacts.")
             collection.artifacts = None
 
     dispatch = {
@@ -151,6 +198,8 @@ def cluster_texts(
     clustering_config: Optional[ClusteringConfig] = None,
     visualization_config: Optional[VisualizationConfig] = None,
     embedding_provider: Optional[EmbeddingProvider] = None,
+    selection_config: Optional[RepresentativeSelectionConfig] = None,
+    labeling_config: Optional[LabelingConfig] = None,
 ) -> ContentUnitCollection:
     """Run embedding, clustering, and optional visualization for the collection."""
 
@@ -161,15 +210,60 @@ def cluster_texts(
     embed_texts(collection, provider=provider)
     run_kmeans(collection, clustering_config)
 
+    artifact_dir: Optional[Path] = None
+
+    def _ensure_artifact_dir(config: Optional[VisualizationConfig]) -> Path:
+        nonlocal artifact_dir
+        if artifact_dir is not None:
+            return artifact_dir
+        base_config = config or VisualizationConfig()
+        artifact_dir = _create_artifact_run_directory(base_config.output_path)
+        return artifact_dir
+
+    if labeling_config is not None:
+        auto_label_clusters(collection, labeling_config, selection_config)
+        if collection.label_results:
+            directory = _ensure_artifact_dir(visualization_config)
+            label_path = write_labels_artifact(collection.label_results, directory)
+            if collection.artifacts:
+                collection.artifacts.labels_json = label_path
+            else:
+                collection.artifacts = VisualizationArtifacts(labels_json=label_path)
+    elif selection_config is not None:
+        select_representatives(collection, selection_config)
+
     if visualization_config is not None:
-        artifacts = generate_visualization(collection, visualization_config)
-        collection.artifacts = artifacts if artifacts.generated else None
+        existing_artifacts = collection.artifacts
+        directory = _ensure_artifact_dir(visualization_config)
+        artifacts = generate_visualization(
+            collection,
+            visualization_config,
+            artifact_dir=directory,
+        )
+        if existing_artifacts and existing_artifacts.labels_json:
+            artifacts.labels_json = existing_artifacts.labels_json
+        collection.artifacts = artifacts if artifacts.generated or artifacts.labels_json else None
     else:
-        collection.artifacts = None
+        if not (collection.artifacts and collection.artifacts.labels_json):
+            collection.artifacts = None
 
     return collection
 
+def _create_artifact_run_directory(base_dir: Path) -> Path:
+    base_dir = Path(base_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
 
+    for _ in range(3):
+        timestamp = datetime.now(timezone.utc).strftime("%m%d%Y_%H%M%S")
+        suffix = uuid4().hex[:6]
+        candidate = base_dir / f"artifacts_{timestamp}_{suffix}"
+        try:
+            candidate.mkdir(parents=False, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+
+    raise RuntimeError("Unable to create a unique artifact directory")
 def _resolve_embedding_provider(config: object) -> Optional[EmbeddingProvider]:
     if config is None:
         return None
