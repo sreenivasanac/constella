@@ -24,7 +24,20 @@ LOGGER = logging.getLogger(__name__)
 # https://www.geeksforgeeks.org/machine-learning/ml-determine-the-optimal-value-of-k-in-k-means-clustering/
 
 def _candidate_clusters(config: ClusteringConfig, sample_size: int) -> Sequence[int]:
-    """Derive feasible cluster counts constrained by config limits and sample size."""
+    """Derive feasible cluster counts constrained by config limits and sample size.
+    
+    Generates a sequence of valid cluster counts based on configuration constraints
+    and the available sample size. Ensures all candidates fall within valid bounds
+    and includes a fallback option.
+    
+    Args:
+        config: Clustering configuration containing min/max cluster constraints.
+        sample_size: Number of data points available for clustering.
+        
+    Returns:
+        Sorted sequence of valid cluster counts to evaluate. Falls back to a
+        single-element list with the fallback cluster count if no valid range exists.
+    """
 
     if sample_size <= 2:
         return [min(sample_size, max(1, config.fallback_n_clusters))]
@@ -41,6 +54,17 @@ def _candidate_clusters(config: ClusteringConfig, sample_size: int) -> Sequence[
 
 
 def _resolve_kmeans_init(vectors: np.ndarray) -> str:
+    """Determine the appropriate initialization method for K-Means based on data range.
+    
+    Uses 'random' initialization for data with large value ranges (>1000) to avoid
+    numerical instability, otherwise uses 'k-means++' for better convergence.
+    
+    Args:
+        vectors: Input data array to analyze.
+        
+    Returns:
+        Initialization method string: either 'random' or 'k-means++'.
+    """
     data_range = np.max(vectors) - np.min(vectors)
     return 'random' if data_range > 1e3 else 'k-means++'
 
@@ -51,6 +75,22 @@ def _fit_kmeans(
     seed: int,
     init: str,
 ) -> Tuple[KMeans, np.ndarray]:
+    """Fit a K-Means model to the input vectors with suppressed warnings.
+    
+    Performs K-Means clustering with the specified parameters, suppressing
+    sklearn RuntimeWarnings that may occur during convergence.
+    
+    Args:
+        vectors: Input data array of shape (n_samples, n_features).
+        n_clusters: Number of clusters to form.
+        seed: Random state seed for reproducibility.
+        init: Initialization method ('k-means++' or 'random').
+        
+    Returns:
+        Tuple containing:
+            - Fitted KMeans model instance.
+            - Array of cluster labels for each input vector.
+    """
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', category=RuntimeWarning, module='sklearn')
         model = KMeans(n_clusters=n_clusters, init=init, n_init=10, random_state=seed)
@@ -65,6 +105,23 @@ def _safe_silhouette_score(
     rng: RandomState,
     context: str,
 ) -> Optional[float]:
+    """Safely compute silhouette score with error handling and sampling.
+    
+    Calculates the silhouette coefficient for clustering quality assessment,
+    with robust error handling and optional sampling for large datasets.
+    Returns None if computation fails or input is invalid.
+    
+    Args:
+        vectors: Input data array of shape (n_samples, n_features).
+        labels: Cluster labels for each sample.
+        sample_size: Optional sample size for computation efficiency. If None,
+            uses all samples.
+        rng: Random number generator for sampling reproducibility.
+        context: Descriptive string for error logging context.
+        
+    Returns:
+        Silhouette score as float, or None if computation fails or is invalid.
+    """
     unique_labels = np.unique(labels)
     if unique_labels.size <= 1 or unique_labels.size >= len(vectors):
         return None
@@ -100,6 +157,20 @@ def _safe_davies_bouldin_score(
     labels: np.ndarray,
     context: str,
 ) -> Optional[float]:
+    """Safely compute Davies-Bouldin index with error handling.
+    
+    Calculates the Davies-Bouldin score to evaluate clustering quality.
+    Lower scores indicate better clustering. Returns None if computation
+    fails or input is invalid.
+    
+    Args:
+        vectors: Input data array of shape (n_samples, n_features).
+        labels: Cluster labels for each sample.
+        context: Descriptive string for error logging context.
+        
+    Returns:
+        Davies-Bouldin score as float, or None if computation fails or is invalid.
+    """
     unique_labels = np.unique(labels)
     if unique_labels.size <= 1:
         return None
@@ -116,6 +187,19 @@ def _safe_davies_bouldin_score(
 
 # https://www.perplexity.ai/search/elbow-method-kmeans-scikit-lea-jHTIQx3cSFKklK4Dq1tWWw#0
 def _select_elbow_k(candidates: Sequence[int], inertias: Sequence[float]) -> Optional[int]:
+    """Select optimal cluster count using the elbow method.
+    
+    Applies the elbow method by finding the point of maximum perpendicular
+    distance from the line connecting the first and last inertia values.
+    This identifies where adding more clusters yields diminishing returns.
+    
+    Args:
+        candidates: Sequence of cluster counts that were evaluated.
+        inertias: Corresponding inertia (within-cluster sum of squares) values.
+        
+    Returns:
+        Optimal cluster count as integer, or None if determination fails.
+    """
     if len(candidates) < 2 or len(candidates) != len(inertias):
         return None
 
@@ -141,6 +225,21 @@ def _evaluate_candidate_metrics(
     config: ClusteringConfig,
     candidates: Sequence[int],
 ) -> Dict[int, Dict[str, float]]:
+    """Evaluate clustering quality metrics for all candidate cluster counts.
+    
+    Fits K-Means models for each candidate cluster count and computes
+    configured quality metrics (inertia, silhouette score, Davies-Bouldin score).
+    Skips candidates that cause numerical errors during fitting.
+    
+    Args:
+        vectors: Input data array of shape (n_samples, n_features).
+        config: Clustering configuration specifying which metrics to compute.
+        candidates: Sequence of cluster counts to evaluate.
+        
+    Returns:
+        Dictionary mapping cluster count to metric dictionary. Each metric dict
+        contains 'inertia' and optionally 'silhouette' and 'davies_bouldin' scores.
+    """
     sample_size = config.silhouette_sample_size if config.enable_silhouette_selection else None
     rng = RandomState(config.seed)
     init_method = _resolve_kmeans_init(vectors)
@@ -193,6 +292,19 @@ def _best_metric_choice(
     metric_name: str,
     prefer_max: bool,
 ) -> Optional[int]:
+    """Select the cluster count with the best value for a specific metric.
+    
+    Searches through computed metrics to find the cluster count that optimizes
+    the specified metric. For ties, prefers smaller cluster counts.
+    
+    Args:
+        metrics: Dictionary mapping cluster count to metric values.
+        metric_name: Name of the metric to optimize (e.g., 'silhouette', 'davies_bouldin').
+        prefer_max: If True, select maximum metric value; if False, select minimum.
+        
+    Returns:
+        Cluster count with optimal metric value, or None if metric not found.
+    """
     best_value: Optional[float] = None
     best_k: Optional[int] = None
 
@@ -216,6 +328,19 @@ def _best_metric_choice(
 
 
 def _select_cluster_count(vectors: np.ndarray, config: ClusteringConfig) -> int:
+    """Determine optimal cluster count using multiple selection methods.
+    
+    Evaluates candidate cluster counts using configured methods (silhouette,
+    Davies-Bouldin, elbow) and selects the maximum recommendation. Falls back
+    to configured fallback value if no method produces a valid result.
+    
+    Args:
+        vectors: Input data array of shape (n_samples, n_features).
+        config: Clustering configuration specifying selection methods and constraints.
+        
+    Returns:
+        Selected cluster count as integer.
+    """
     candidates = _candidate_clusters(config, len(vectors))
     if not candidates:
         return min(len(vectors), max(2, config.fallback_n_clusters))
@@ -275,7 +400,23 @@ def run_kmeans(
     collection: "ContentUnitCollection",
     config: Optional[ClusteringConfig] = None,
 ) -> "ContentUnitCollection":
-    """Select an appropriate cluster count, run K-Means, and attach results to the collection."""
+    """Execute K-Means clustering on a content unit collection with automatic cluster selection.
+    
+    Performs complete K-Means clustering workflow: determines optimal cluster count
+    using configured selection methods, fits the model, computes quality metrics,
+    and attaches results to the collection.
+    
+    Args:
+        collection: ContentUnitCollection containing embeddings to cluster.
+            Must be non-empty with valid 2D embedding matrix.
+        config: Optional clustering configuration. If None, uses default ClusteringConfig.
+        
+    Returns:
+        The same collection with cluster IDs attached and metrics populated.
+        
+    Raises:
+        ValueError: If collection is empty or embeddings are invalid.
+    """
 
     if len(collection) == 0:
         raise ValueError("Input collection must not be empty.")
