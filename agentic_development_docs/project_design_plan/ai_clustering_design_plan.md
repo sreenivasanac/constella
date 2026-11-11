@@ -1,225 +1,232 @@
-# AI-First Clustering — Design Plan
+# AI-First Clustering — Design Plan (v2)
 
-Status: **design only, awaiting approval.** No code changes accompany this document.
+Status: **design only, awaiting approval.** No code changes accompany this document. v2 records the answers to the v1 open questions and is backed by experiments on the real data (2026-11-11). Experiment scripts, outputs and group listings are outside the repo in `~/acct_cleanup/experiments/` (they contain personal service lists and are deliberately not copied here). Base commit for the work is unchanged: `a905c64` (`v0.1.0`).
 
-**Base commit.** Branch `ai-clustering` was created from `a905c64` (`improve_refactor`, tag `v0.1.0`, "chore: prepare for PyPI release v0.1.0"). `main` is at `afa715e` ("Merge pull request #10 from sreenivasanac/dev"). `git rev-list --left-right --count main...a905c64` is `4 2`: the 4 commits only on `main` are merge commits (`25027e1`, `9fad6fd`, `b393693`, `afa715e`); the 2 only on `a905c64` are `3138d6c` (split `llm.py` into modular labeling components) and `a905c64` (PyPI prep). `a905c64` is therefore the right base: it is what `account-clustering` was built on and it has the latest library work, which `main` lacks.
+## 1. Decisions (from the v1 questions)
 
-## 1. Goals and non-goals
+| # | Decision |
+| --- | --- |
+| 1 | **Jev** is TypeSafe AI's decision model. Grok writes text; Jev answers closed questions. `decide()` stays backend-pluggable (§5). |
+| 2 | **Embeddings:** xAI was probed and is not available for this key (§3). Default is OpenAI `text-embedding-3-small`; local sentence-transformers is the zero-egress option. |
+| 3 | **Algorithm:** chosen from data (§6): LLM-named top level + decision-model filing + size-balanced Ward second level. |
+| 4 | **Chat model:** `grok-4.7`, real-time, `reasoning_effort=low`. `--batch` uses the Batch API (20% off, up to ~24 h). |
+| 5 | **Output is a tree** (2 levels) where an item may sit in more than one node; node sizes are balanced (§7). |
+| 6 | **No alias tables, no sibling-domain heuristics.** The only normalization is dedup by identical registrable domain. Related brands meet through descriptions + embeddings. |
+| 7 | Items that fit nowhere stay **Unclustered** for review. |
+| 8 | **No gold set.** Evaluation is LLM-judge spot checks, metrics and a readable tree printout (§9). |
+| 9 | Records ingest/merge stays a thin `constella.records` adapter; the core stays text-only. |
 
-**Goals**
-
-- Groups are **discovered** by embeddings + clustering and **named** by an LLM. No keyword, domain-table or taxonomy rules decide a group.
-- Each item gets a short LLM-written description; the description (not the raw name) is what gets embedded.
-- Every model is configurable: local (sentence-transformers, Ollama) or cloud through LiteLLM. The account-cleanup run uses xAI Grok (`xai/` prefix, `XAI_API_KEY`).
-- Token-efficient: many items per call, disk cache for everything, only cluster representatives reach the labeler.
-- Stays a generic library (bookmarks, emails, tickets, document snippets); account cleanup is the driving use case, not a special case in the algorithm.
-- Privacy by construction: only names and domains leave the machine.
-
-**Non-goals**
-
-- No fixed taxonomy and no rules-first mode. No LLM-assigns-a-category-per-item replacement for clustering.
-- No account actions (deleting, logging in, changing addresses). Constella only organizes.
-- No model training or fine-tuning in v1.
+Goals are unchanged from v1: groups are discovered and named by models, never by keyword/domain rules; only names and registrable domains leave the machine; every model is configurable; only representatives reach the labeling LLM; the library stays generic.
 
 ## 2. Pipeline
 
 ```text
 records (JSON/CSV)
- 1. ingest + normalize     column mapping; URL -> registrable domain          [deterministic, normalization]
- 2. dedup / merge          identical domain -> one item, sources merged       [deterministic, normalization]
- 3. describe (LLM)         name + domain -> short phrase + confidence/unsure  [batched, cached]
- 4. fetch fallback         unsure only: GET homepage -> title/meta/snippet -> re-describe
- 5. embed                  description -> vector                              [local or cloud, cached]
- 6. cluster                improved Constella clustering -> groups (+ parents, + unclustered)
- 7. label (LLM)            representatives only -> name, explanation, confidence, keywords
- 8. decide (optional)      merge / split / needs-review routing               [decision model, v2]
- 9. export                 items, groups, manifest, UMAP HTML
+ 1. ingest + dedup       URL -> registrable domain; identical domain -> one item      [deterministic]
+ 2. describe             name + domain -> 3-10 word description, confidence, unsure   [Grok, 50 items/call, cached]
+ 3. route                confident / needs homepage fetch / needs review              [decide: choice]
+ 4. fetch + re-describe  GET https://<domain>/ -> title + meta description            [HTTP, then Grok]
+ 5. embed                "name — description" -> vector                               [cached]
+ 6. propose branches     60 micro-cluster summaries -> 8-14 named top branches        [Grok, 1 call]
+ 7. file items           nearest branch by embedding; decision model when unsure      [decide: choice]
+ 8. balance top level    split branches > 15% of items, merge branches < 3%           [deterministic]
+ 9. second level         Ward inside each branch, then split > 40 / merge < 4         [deterministic]
+10. unclustered          far-from-centroid items and "no branch fits" -> Unclustered
+11. label nodes          6-8 representatives per node, 25 nodes per call              [Grok]
+12. multi-membership     centroid-similarity candidates, each confirmed yes/no        [decide: noul]
+13. review edits         merge two siblings? split a loose node?                      [decide: noul; Grok names new nodes]
+14. export               tree JSON, indented markdown tree, UMAP HTML, manifest
 ```
 
-Steps 1–2 are the only deterministic logic and they never decide a group: they make two rows for the same site one item. For generic text corpora (tickets, snippets) steps 1–4 are skipped and the existing `ContentUnit.text` is embedded directly, so `cluster_texts` keeps working.
+For plain text corpora (tickets, snippets) steps 1–4 are skipped; `cluster_texts` keeps K-Means as its default and gains `algorithm=agglomerative|hdbscan`. With `--decision off` and no chat model, steps 6–7 fall back to a balanced Ward top level, so a fully offline path exists.
 
-## 3. Description generation
+## 3. Embeddings: xAI probe and chosen backend
 
-- **Input per item:** display name + registrable domain. Nothing else.
-- **Prompt (system, fixed so it can be prompt-cached):** "For each site, write what it is in at most 10 words (e.g. *online bank*, *applicant tracking portal*, *food delivery app*). Describe the kind of service, not the brand. If you do not recognise it or the name is ambiguous, set `unsure` instead of guessing."
-- **Batching:** 50 items per call, each with a batch-local integer id.
-- **Structured output:** `[{id, description, confidence (0–1), unsure (bool)}]` via LiteLLM `response_format` (the same mechanism `LabelPayload` uses today). Validate that every id comes back exactly once; re-ask missing ids in a smaller batch.
-- **Unsure signal:** an item needs the fallback when `unsure` is true **or** `confidence < confidence_threshold` (default 0.7). Self-reported confidence is weakly calibrated, so the explicit flag is the primary signal and the threshold is tunable from the evaluation set.
-- **Cache key:** SHA-256 of `{domain or name, model, prompt_version, source: knowledge|homepage}`; one JSON entry per item, so a re-run or a batch-size change costs nothing.
-- **Homepage fallback:** direct HTTP GET of `https://<domain>/` only (no path, no query string, no cookies), with a timeout, a size cap and a redirect limit, using the standard library. Extract `<title>`, meta/OG description and about 200 tokens of visible text; never send raw HTML. Re-describe in batches of 20 with that context. Page text is untrusted: the prompt marks it as data, and the output schema is a short phrase.
-- **Fetch failures** (dead site, bot wall, local/intranet host): keep the first description, mark the item `needs_review`. Local hosts and IPs are never fetched.
-- xAI's server-side Web Search is **not** the default: $5 / 1k calls against $0 for a GET (see §10).
+Probe run 2026-11-11 with the project's `XAI_API_KEY` (result file: `~/acct_cleanup/experiments/xai_embedding_probe.json`):
 
-## 4. Embedding choice
-
-Any LiteLLM embedding model stays configurable (existing OpenAI and Fireworks adapters are unchanged). For this use case:
-
-| Option | Status | Cost for ~1,400 descriptions |
-| --- | --- | --- |
-| **Local sentence-transformers** (small English model, e.g. MiniLM class) — proposed default | New optional extra; descriptions never leave the machine | $0 |
-| OpenAI `text-embedding-3-small` — cloud fallback | Existing adapter, `OPENAI_API_KEY` | ~$0.0007 |
-| Ollama embedding model | LiteLLM `ollama/` prefix, local | $0 |
-| xAI embeddings | Not the default: see below | **TBD** |
-
-xAI's OpenAPI documents `POST /v1/embeddings` and `GET /v1/embedding-models`, but the public pricing page lists no embedding prices, LiteLLM's xAI page does not document embeddings, model ids seen in unofficial writeups are unverified, and at least one third-party report shows an empty embedding-model list for their key. The design offers `xai/<embedding-model>` as an optional path to probe later, never as a requirement. xAI Collections (file RAG) is a different product and is not used.
-
-One code-level detail to fix: today `embed_texts` embeds `ContentUnit.get_content()`, which prefixes `Id:` and metadata lines. The description pipeline embeds the bare description so identifiers do not pull vectors together.
-
-## 5. Clustering algorithm
-
-| | K-Means (current) | HDBSCAN | Agglomerative (hierarchical) |
-| --- | --- | --- | --- |
-| Choosing scale | `k` search; today capped at `max_candidate_clusters=15` and takes the **max** of silhouette / elbow / Davies–Bouldin picks | `min_cluster_size`; `k` emerges | One tree, cut at any `k` or distance |
-| Outliers | None; every item is forced into a cluster | Explicit noise label; on short texts the noise share can be large | None natively; tiny clusters can be treated as unclustered |
-| Multi-level groups | Needs a second run per cluster (what the rejected branch did) | Flat in scikit-learn's implementation | Native: two cuts of one tree nest exactly |
-| Determinism | Seeded | Deterministic, but usually run after UMAP reduction, which is stochastic | Fully deterministic, no seed |
-| Scale | 100k+ | 100k+ | O(n²) memory: fine to roughly 20k items |
-| Dependency | scikit-learn | `sklearn.cluster.HDBSCAN` (already satisfied by `scikit-learn>=1.3`) | scikit-learn |
-
-**Recommendation:** add a `ClusteringConfig.algorithm` switch with all three, and make **agglomerative on L2-normalised vectors** (Ward linkage; linkage configurable) the default for the description pipeline:
-
-- ~1,400 short descriptions is small, so O(n²) is irrelevant, and the user wants every service placed.
-- "Finance > Banking" falls out of one dendrogram: a fine cut gives groups, a coarser cut of the same tree gives parents, guaranteed nested.
-- **Choosing `k`:** build the tree once, then score many cuts cheaply (range scaled to `n`, e.g. 2 … n/10) with cosine silhouette under a minimum-group-size constraint. The parent level is a second, coarser cut picked the same way. An explicit `n_clusters` / `distance_threshold` override stays available.
-- **Outliers:** groups below `min_cluster_size` become `Unclustered` (cluster id −1), skipped by representative selection and labeling, surfaced for review rather than forced into a wrong group.
-
-K-Means remains the default for plain `cluster_texts` on large corpora (backward compatible), with its candidate range scaled to `n` instead of the fixed cap of 15. HDBSCAN is offered for callers who prefer explicit noise. The default is a hypothesis to confirm on the gold set (§12), not a claim.
-
-## 6. LLM labeling of clusters
-
-Reuse the existing flow unchanged in shape: `select_representatives` (centroid-near core + diversity picks) → `build_labeling_messages` → LiteLLM structured `LabelPayload` (label, explanation, confidence, keywords). Adaptations:
-
-- Representatives show `name — description` only; 6–8 per cluster is enough for one-line items (default is 20 today).
-- `LabelingConfig.model = "xai/grok-4.7"`; `get_provider_config` already returns no overrides for unknown providers, so LiteLLM reads `XAI_API_KEY` itself. Add a `reasoning_effort` pass-through.
-- Parent groups are labeled from their children's labels (one short call per parent), not from more items.
-- Results go through the disk cache carried over from the rejected branch.
-
-## 7. "Jev" interpretation
-
-**Primary reading — a decision model.** Jev is TypeSafe AI's "System One" decision model: unstructured *state* plus typed *questions* in, typed answers with probabilities out (`choice`, `score`, `noul`); it does not write free text. The Hugging Face post "Decision Models in Hugging Face" (10 Nov 2026) shows the same interface with the open model `autotrust/GEV-26B-Decide` via `pipeline("decision", ...)`, which likely explains the original spelling "Gev". Sources: https://sproutstack.dev/learn/comparisons/jev-vs-jepa-vs-llm, https://huggingface.co/blog/decision.
-
-**Where it fits.** Closed-option decisions around the pipeline, not the pipeline itself:
-
-- After describing: `confident` / `needs_homepage_fetch` / `needs_human_review`.
-- After clustering: is this cluster too mixed (split)? should these two merge? which hierarchy cut?
-
-It does **not** replace description writing (generative) or embed + cluster (group discovery).
-
-**Design.** A small decision interface — `decide(state, question) -> {option, probabilities, confidence}` — with interchangeable backends: (a) a Grok structured-output stand-in (portable, uses the planned Grok credits), (b) local GEV through Hugging Face, (c) TypeSafe Jev. No hard dependency on TypeSafe, whose API is in early access. In v1 the first decision is simply the `unsure` field of the description response, so no extra call is needed; merge/split is a later phase.
-
-**Caveats.** Typed output guarantees shape, not correctness. Independent work ("Type-Safe Is Not Error-Free", "JevOut") showed decision models can follow option *names* over definitions and can be flipped by extra context, so low-confidence answers fall back to an LLM or a human. Vendor-reported Jev pricing on Cloudflare Workers AI ($0.042 / 1M input tokens, per the explainer above) may change and is not used in §10.
-
-**Alternate reading — JEPA.** Joint-Embedding Predictive Architecture (LeCun / Meta: I-JEPA, V-JEPA, research LLM-JEPA) predicts missing *representations* rather than tokens. The names collide (there is even a 2026 "Jev-JEPA" preprint), and "strongly consider Gev and embedding" could point here. JEPA is a representation-learning research line, mostly vision/video, not a drop-in text-clustering API, so it is not proposed for v1. See open question 1.
-
-## 8. `account-clustering`: kept, reworked, dropped
-
-| Verdict | Item |
+| Call | Result |
 | --- | --- |
-| **Keep** | `records/ingest.py` (JSON/CSV column mapping); `records/privacy.py` (`scrub`, `safe_text`); `labeling/cache.py` (generalised to also cache descriptions); `embeddings/fake.py` (offline tests); export of items / groups / manifest; CLI entry point |
-| **Rework** | `records/normalize.py`: keep URL cleaning and registrable-domain extraction; the hand-curated brand-alias, product-split and platform-tenant tables become an optional caller-supplied alias map, empty by default. `records/merge.py`: keep grouping by domain and date/flag aggregation. `pipelines/organize.py`: rewritten as the pipeline in §2. `records/models.py`: drop rule-provenance fields |
-| **Drop** | `records/rules.py` entirely (domain→category map, keyword rules, source-category priors, public-suffix sector rules); the fixed 20-label taxonomy and `fixed` / `hybrid` modes; `rules` mode; clustering only the "leftovers" |
-| **Out of the algorithm** | `records/caller.py` (former employment, mailing regions, shared phones) and `records/actions.py`: optional caller metadata attached **after** clustering, never an input to it; deferred until the core is approved |
+| `GET /v1/embedding-models` | HTTP 200, `{"models": []}` — no embedding model is listed for this team |
+| `GET /v1/models` | HTTP 200, 13 models, all chat/image/video (`grok-4.7`, `grok-4.6`, `grok-4.5`, `grok-4.3`, `grok-4.20-*`, `grok-build-0.1`, `grok-imagine-*`); no embedding model |
+| `POST /v1/embeddings`, model `v1` | HTTP 404 `not-found`: "The model v1 does not exist or your team … does not have access to it" |
+| `POST /v1/embeddings`, model `grok-embedding-small` | HTTP 404, same message |
 
-## 9. Config surface and CLI
+No vectors, dimensions or embedding prices could be obtained. `/v1/models` does return price fields for chat models: `grok-4.7` has `prompt_text_token_price` 20000, `cached_prompt_text_token_price` 5000, `completion_text_token_price` 60000. Matching these to the published $2.00 / $0.50 / $6.00 per 1M tokens gives the unit: **1 unit = $0.0001 per 1M tokens**.
 
-New or extended dataclasses in `constella.config.schemas`:
+**Chosen backend:** OpenAI `text-embedding-3-small` (1,536 dims), the backend all experiments ran on: 13,873 tokens for 1,322 items = **$0.0003**. Only the generated "name — description" text is sent. Local `all-MiniLM-L6-v2` (384 dims, $0) also ran and stays available as `--embedding local`, but its trees differ noticeably from the OpenAI ones (adjusted Rand index 0.24–0.44 between backends for the same algorithm) and were not judged, so it is an option, not the default. `xai/<model>` stays a config value to retry if xAI enables embeddings for the account.
 
-- `DescriptionConfig`: `model`, `reasoning_effort`, `batch_size=50`, `confidence_threshold=0.7`, `fetch_homepage=True`, `fetch_timeout`, `prompt_version`.
-- `EmbeddingConfig`: `backend` (`local` | `openai` | `fireworks` | `litellm` | `fake`), `model`.
-- `ClusteringConfig` (extended): `algorithm` (`agglomerative` | `hdbscan` | `kmeans`), `levels` (1 | 2), `min_cluster_size`, `linkage`, existing K-Means fields.
-- `LabelingConfig` (existing) plus `reasoning_effort`.
-- `DecisionConfig`: `backend` (`off` | `llm` | `hf` | `jev`), `model`, `min_confidence`.
-- Shared: `cache_dir`, `privacy=True`.
+## 4. Descriptions (measured)
 
-Models are LiteLLM strings: `xai/<model>` (`XAI_API_KEY`), OpenAI and Fireworks as today (`OPENAI_API_KEY`), `ollama/<model>` for local chat. No key is needed for local embeddings.
+Prompt and schema as in v1: `{id, description, confidence, unsure}` per item, 50 items per call, cache keyed per item.
 
-```text
-constella organize INPUT [INPUT ...] --output-dir DIR
-    [--describe-model xai/grok-4.7] [--label-model xai/grok-4.7] [--reasoning-effort low]
-    [--embedding local|openai|fireworks|litellm|fake] [--embedding-model NAME]
-    [--cluster-algo agglomerative|hdbscan|kmeans] [--levels 1|2] [--min-cluster-size N]
-    [--confidence-threshold 0.7] [--fetch on|off] [--decision off|llm|hf|jev]
-    [--cache-dir DIR] [--privacy on|off] [--dry-run]
-```
+- 1,322 entities (2,248 vault logins + 657 mail-inventory rows, deduped by identical registrable domain; 66 have no domain). 27 calls, all ids returned, median description 5 words.
+- Latency: median 28.7 s per call, max 39.7 s; about 3.2 minutes of wall time with 4 concurrent calls.
+- Tokens: 53,553 input (31,488 billed as cached) and 69,041 output, of which 35,092 were reasoning tokens even at `low`. Cost **$0.474**.
+- **Unsure rate 20.1%** (266 items; 271 with `confidence < 0.7`).
+- Homepage fallback on a sample of 40 unsure items: 23 pages returned a usable title/meta description, 17 failed or were empty; after one re-describe call ($0.012) **17 of 40 (43%) became confident**. Worth keeping, but more than half of unsure items stay unsure and should go to Unclustered rather than be filed on a guess (see §6 examples).
 
-`--dry-run` prints item count, planned calls and estimated tokens without calling anything.
+## 5. Grok + Jev division of labor
 
-## 10. Caching and cost for ~1,400 services
+Jev ("System One", `jev-1.14.0` / `jev-1.13.0`) takes a *state* plus typed questions (`choice`, `score`, `noul`) and returns answers with probabilities. It costs **$0.042 per 1M input tokens, output free**, so closed questions should go to Jev and only text generation to Grok. Docs: https://docs.typesafe.ai/models, https://docs.typesafe.ai/introduction/quickstart.
 
-**Caches (all on disk under `cache_dir`):** descriptions per item, homepage extracts per domain, embeddings per `(model, text)`, labels per `(model, prompt_version, messages)`. A second run with unchanged inputs costs about $0; new services cost only their own share.
+| Step | Model | Question |
+| --- | --- | --- |
+| Describe an item; re-describe from homepage text | **Grok** | generation |
+| Route after describing | **Jev** `choice` | confident / needs homepage fetch / needs human review (v1 fallback without Jev: the `unsure` flag) |
+| Propose 8–14 top branches (name + one-sentence description) | **Grok** | generation, 1 call |
+| File an item into a top branch | embedding first, **Jev** `choice` when the margin is small | options = branch names + "none of these fit" |
+| Does this item also belong in node X? | **Jev** `noul` | one question per candidate node, all candidates of an item in one request |
+| Merge these two sibling nodes? Split this node? | **Jev** `noul` | state = node labels + a few representatives |
+| Label second-level nodes; name nodes created by a split | **Grok** | generation, representatives only |
 
-**Prices used** (xAI pricing page, https://docs.x.ai/developers/pricing, short context, per 1M tokens): `grok-4.7` $2.00 input / $0.50 cached input / $6.00 output; `grok-4.3` $1.25 / $0.20 / $2.50. Batch API: 20% off. Web Search tool: $5 / 1k calls. OpenAI `text-embedding-3-small`: $0.02 / 1M tokens. LiteLLM xAI provider: https://docs.litellm.ai/docs/providers/xai.
+**Interface.** `decide(state: str, questions: dict[str, Question]) -> dict[str, Answer]`, where `Question = {type: choice|noul|score, instructions, options?}` and `Answer = {choice, probabilities, confidence}` or a probability/score. One state with many questions is one request, which is how Jev bills cheaply (questions are evaluated independently against the same state).
 
-**Assumptions:** `xai/grok-4.7`, `reasoning_effort=low` so reasoning tokens are not a dominant extra; no prompt-cache credit; token counts are estimates.
+**Backends** (`DecisionConfig.backend`): `typesafe` (`POST https://api.typesafe.ai/v1/systemone`, `TYPESAFE_API_KEY`, `jev-latest`); `openrouter` (`typesafe/jev-1.13` at `/api/alpha/decisions`, `OPENROUTER_API_KEY`, no waitlist, returns `usage.cost`); `cloudflare` (Workers AI `typesafe/jev`); `hf` (local `autotrust/GEV-26B-Decide` via `pipeline("decision")`); `grok` (structured-output stand-in that batches many states per call); `off`. LiteLLM's `/typesafe` pass-through is an alternative transport (https://docs.litellm.ai/docs/pass_through/typesafe).
 
-| Stage | Assumptions | Input | Output | Subtotal |
-| --- | --- | --- | --- | --- |
-| A. Describe (knowledge-first) | 50 sites/call → 28 calls; ~400-token system prompt + ~15 tokens/site ≈ 1,150 in/call; ~40 out/site | 28 × 1,150 = 32,200 → $0.064 | 28 × 2,000 = 56,000 → $0.336 | **~$0.40** |
-| B. Homepage fallback | 15% unsure → 210 sites; HTTP GET ($0); 20/call → 11 calls; ~4,700 in/call | 51,700 → $0.103 | 11 × 20 × 40 = 8,800 → $0.053 | **~$0.16** |
-| C. Label clusters | ~50 clusters × 6 representatives; ~490 in, ~80 out per cluster | 24,500 → $0.049 | 4,000 → $0.024 | **~$0.07** |
-| D. Embeddings | ~1,400 × ~25 tokens ≈ 35,000 tokens | local: $0 · OpenAI: ~$0.0007 · xAI: **TBD** | | **$0** |
+**Guards.** Typed output guarantees shape, not correctness; "Type-Safe Is Not Error-Free" and "JevOut" report name-over-definition bias and context flips. So: option names are descriptive and the definition is repeated in the instructions; answers below `min_confidence` go to Grok or to review; a `noul` alone never triggers a split (see §7).
 
-- **Total, recommended path:** $0.40 + $0.16 + $0.07 ≈ **$0.63**; allow **$0.60–$0.80** with parse retries. A parent-label level (~10 more calls of size C) adds about $0.015.
-- **Same traffic on `grok-4.3`:** $0.18 + $0.09 + $0.04 ≈ **$0.31**.
-- **Batch API (20% off, results typically within 24 hours):** `grok-4.7` total ≈ **$0.50**.
-- **If the fallback used xAI Web Search:** 210 × $5 / 1,000 = **$1.05** plus tokens, more than the whole recommended run.
-- **Reasoning warning:** `grok-4.7` defaults to `reasoning_effort=high` and reasoning tokens are billed as output. Illustration only (not measured): 3,000 extra output tokens per description batch is 28 × 3,000 = 84,000 → **$0.50** extra on stage A alone. Use `low` (or a cheaper model) for these short structured calls.
-- An optional Grok-backed decision stage over ~50 clusters is about the size of stage C (~$0.07); not included above.
+**What was tested.** This machine has no TypeSafe or OpenRouter key, so every decision step ran on the Grok stand-in behind the same interface, and Jev cost is estimated from token sizes (§8). Filing all 1,322 items with the stand-in: no ids missing, 30 items answered "no folder fits", agreement with plain embedding assignment was 71% overall and **39% / 63% / 85% / 96%** from the lowest to the highest quartile of embedding margin (best minus second-best branch similarity). That supports the gate: file by embedding when the margin is large, ask the decision model otherwise.
 
-## 11. Privacy
+## 6. Clustering experiments and the chosen algorithm
 
-- **Sent to remote chat models:** service display name and registrable domain; on fallback, the public homepage's title, meta description and text snippet. Titles pass through `scrub` first, because vault titles sometimes embed an email address.
-- **Sent to a remote embedding model (only if a cloud backend is chosen):** the generated description.
-- **Never sent:** usernames, email addresses, passwords, raw email bodies, URL paths or query strings, dates, card/address flags, caller config.
-- Private fields live only on the record objects and are never placed in a `ContentUnit`, so no prompt builder can reach them.
-- The homepage GET requests the bare root URL without cookies or credentials; it does tell that site an anonymous client visited. `--fetch off` disables it.
-- Logs and the manifest hold counts, model names and cache statistics only. `--privacy off` affects local exports only, never remote payloads.
+**Setup.** n = 1,322 entities, embeddings of "name — description" (OpenAI), L2-normalised. Ten approaches, each producing a two-level tree. Nodes were labelled by `grok-4.7` (low) from 7 representatives. Judge: `grok-4.7` (low) rated 15 sampled second-level nodes per approach for coherence (1–5) with one planted intruder each, and gave one 1–5 rating to each labelled tree. Size bands used: 8–14 top branches of 3–15% of items each; second-level nodes of 4–40 items.
 
-## 12. Evaluation plan
+| Approach | top / 2nd nodes | top min/med/max | 2nd min/med/max | Gini top | % items in top >15% / 2nd >40 | Unclustered % | Silh. 2nd | Intra cos | Judge coherence | Intruder found | Tree 1–5 | Multi % |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Ward, two cuts of one tree | 14 / 120 | 15/79.5/395 | 3/10/40 | 0.417 | 29.9 / 0 | 0.0 | 0.104 | 0.482 | 3.93 | 1.00 | 3 | 1.6 |
+| Ward + size balancing | 12 / 117 | 60/100/181 | 4/9/33 | 0.198 | 0 / 0 | 2.8 | 0.106 | 0.485 | 4.00 | 0.87 | 3 | 2.4 |
+| HDBSCAN, raw vectors | 14 / 40 | 7/26.5/82 | 5/8/35 | 0.364 | 0 / 0 | **64.4** | 0.195 | 0.535 | 4.13 | 1.00 | 2 | 0.0 |
+| HDBSCAN after UMAP | 14 / 89 | 26/66.5/163 | 5/10/104 | 0.316 | 0 / 7.9 | 16.9 | 0.109 | 0.478 | 3.73 | 0.93 | 3 | 0.6 |
+| K-Means (k = n/15 = 88) | 12 / 88 | 32/115/209 | 3/14/51 | 0.270 | 15.8 / 3.9 | 0.0 | 0.076 | 0.450 | 3.60 | 0.87 | 2 | 4.7 |
+| BERTopic-style (UMAP + HDBSCAN + c-TF-IDF) | 14 / 38 | 34/67/152 | 11/24/114 | 0.306 | 0 / 27.9 | 13.5 | 0.094 | 0.428 | 4.00 | 1.00 | 2 | 1.4 |
+| LLM taxonomy, both levels | 11 / 80 | 76/126/164 | 1/15/49 | 0.131 | 0 / 3.7 | 0.0 | 0.037 | 0.417 | 3.60 | 0.87 | **4** | 11.1 |
+| LLM taxonomy, re-centred on members | 11 / 78 | 82/114/164 | 3/15.5/43 | 0.126 | 0 / 6.4 | 3.8 | 0.082 | 0.448 | 3.73 | 0.80 | **4** | 4.2 |
+| LLM top level + balanced Ward | 11 / 108 | 74/116/165 | 4/10/35 | 0.119 | 0 / 0 | 3.0 | 0.076 | 0.468 | 3.87 | 0.93 | 3 | 5.9 |
+| **LLM top level + decide() filing + balanced Ward (chosen)** | 11 / 99 | 76/106/185 | 4/11/36 | 0.147 | 0 / 0 | 4.7 | 0.085 | 0.466 | **4.13** | 0.93 | 3 | 3.9 |
 
-- **Gold set:** 150–200 services hand-grouped by the user (kept local). Report pairwise precision/recall, purity, and ARI / NMI against it.
-- **Purity spot checks:** banks land together; job-application portals together and not inside Shopping; developer tools apart from AI tools unless the tree says otherwise.
-- **Internal metrics, used with care:** cosine silhouette and Davies–Bouldin to compare cuts of the *same* algorithm. For HDBSCAN report noise fraction and cluster persistence instead; silhouette penalises non-convex clusters and ignores noise, so it must not rank HDBSCAN against the others.
-- **Stability:** agreement (ARI) across subsamples and across embedding models.
-- **Description quality:** manual check of ~50 descriptions; unsure rate; how many unsure items the fetch resolves.
-- **Ablation:** cluster raw `name + domain` embeddings versus description embeddings on the gold set, to confirm the description step earns its cost.
-- **Operational:** share of unclustered items, label confidence, actual tokens versus §10.
+Silhouette is cosine over second-level nodes with unclustered items excluded, which flatters HDBSCAN. "Multi %" is the share of items with a candidate second node (as close to another node's centroid as that node's median member). Full table, Gini of the second level and the judge's comments: `~/acct_cleanup/experiments/comparison.md`. Listings: `groups_<approach>.md`; the chosen tree: `best_groups.md`.
 
-## 13. Test plan (offline, no real API calls in CI)
+**What the data says.**
 
-- Fake chat and embedding providers injected everywhere; a test fails if `litellm` is called unmocked.
-- Description batching: batch boundaries, id round-trip, missing or duplicate ids, malformed JSON → retry.
-- Cache: second run makes zero provider calls; changing model or `prompt_version` invalidates.
-- Unsure path: low confidence or `unsure` → mocked HTTP fetch → re-describe; fetch error → `needs_review`; `--fetch off` → no HTTP at all.
-- HTML extraction: title / meta / snippet, size cap, non-HTML responses.
-- Privacy: a sentinel username, email and query string in the input must not appear in any captured prompt, embedding input, cache file or log.
-- Clustering: each algorithm on synthetic blobs; nested two-level cuts; small groups → unclustered; determinism; existing K-Means tests still pass.
-- Labeling: representatives only (payload size bounded regardless of cluster size); id −1 skipped.
-- Decision interface: fake backend; low confidence → fallback.
-- CLI: `--dry-run` and an end-to-end run on a synthetic fixture with fakes.
+- **Silhouette cannot choose the granularity.** On one Ward tree it rises monotonically from 0.060 at k=30 to 0.104 at k=120, so "best silhouette" always picks the largest k allowed. Size bands, not silhouette, must set the number of nodes; silhouette is only used to compare cuts inside a band.
+- **HDBSCAN discards too much.** 64% of items become noise on raw vectors and 17% after UMAP, with a 104-item node left over. The user wants every recognisable service placed.
+- **Embedding-only top levels are the weak part.** Plain Ward put 30% of items in one branch. Balancing fixes sizes (Gini 0.42 → 0.20) but not meaning: the judge found junk-drawer branches and a branch themed by region instead of function.
+- **An LLM-proposed top level is better balanced and better named** (Gini 0.12–0.15, no branch over 15%) for one Grok call that sees 60 micro-cluster summaries, not the items.
+- **Letting the LLM also define the second level looks tidy but fits worst**: lowest silhouette (0.037) and coherence (3.60), oversized leaves, and 11 more Grok calls. Its sub-folder names are written before the contents are known.
+- **Ward inside each branch gives the tightest leaves that still respect the bands**, and it is deterministic.
 
-## 14. Milestones
+**Qualitative examples** (well-known brands only):
 
-0. **Design approval** — this document and the open questions below. Nothing is built before this.
-1. Core library: clustering backends + `algorithm` switch, local and generic-LiteLLM embedding providers, tests.
-2. Description stage: batching, structured output, cache, homepage fallback.
-3. Records adapter: port ingest / merge / privacy / export / CLI from `account-clustering`; rules layer not ported.
-4. Evaluation on a synthetic fixture and the gold set; then, with explicit go-ahead on the §10 estimate, the real ~1,400-service run.
-5. Later: decision-model stage (merge/split), caller metadata, README update.
+- Embedding-only balanced Ward filed Netflix in a leaf of unrelated video sites under a Shopping branch; the chosen approach files it under Media > Media Streaming Services next to Spotify.
+- Balanced Ward put T-Mobile under a region-themed branch and Verizon under a generic "service account portals" leaf; the chosen approach puts both in one "US Telecom Carriers" node.
+- The decision step gave LinkedIn the primary home Jobs > Professional Networking and a second branch Social; Uber got Travel > Rideshare plus a second branch for food delivery. That is the multi-membership behaviour asked for.
+- Still wrong in the chosen tree: USPS landed in an unrelated government-portal leaf, Slack in a scheduling-tools leaf, and unrecognised items were swept into the Social branch as an "unidentified startups" node instead of going to Unclustered.
 
-## 15. Open questions for the user
+**Chosen algorithm: Grok proposes the top level, items are filed by embedding with a decision-model check, and each branch gets a size-balanced Ward second level.** Reasons:
 
-1. **What did "Jev - decision model" mean?**
-   A) TypeSafe Jev / Hugging Face decision models (incl. `GEV-26B-Decide`) for routing and merge/split.
-   B) The same decision interface backed by Grok structured output (**recommended default**; A pluggable later).
-   C) JEPA-style representation learning (not recommended for v1).
-   D) Something else — please name it.
-2. **Default embedding backend?** A) local sentence-transformers (**recommended**: $0, private); B) OpenAI `text-embedding-3-small` (~$0.0007); C) probe xAI embeddings first (price and availability TBD); D) Ollama.
-3. **Default clustering algorithm for this pipeline?** A) agglomerative (**recommended**: nested levels, deterministic); B) HDBSCAN (explicit noise, flat); C) keep K-Means with a wider `k` range.
-4. **Grok chat model?** A) `grok-4.7` with `reasoning_effort=low` (~$0.63, **recommended**); B) `grok-4.3` (~$0.31, try if quality holds on the gold set); C) `grok-4.7` at default high reasoning (cost not bounded by §10). Also: real-time or Batch API (20% off, up to ~24 h)?
-5. **Decision-model stage timing?** A) v1 uses only the `unsure` field, merge/split later (**recommended**); B) full decision stage in v1.
-6. **Flat or multi-level groups?** A) two levels, e.g. Finance > Banking (**recommended**); B) flat; C) full tree export.
-7. **Where do records ingest/merge live?** A) a thin `constella.records` adapter, core stays text-only (**recommended**); B) fully in core; C) outside the package as a script.
-8. **Brand aliases** (sibling domains of one company, shared multi-tenant platforms)? A) dedup by identical registrable domain only (**recommended**; the rest is left to clustering); B) optional caller-supplied alias file; C) keep the curated tables from `account-clustering`.
-9. **Unclustered items?** A) leave as `Unclustered` for review (**recommended**); B) attach to the nearest group; C) ask the decision model.
-10. **Gold set:** are you willing to hand-group ~150–200 services so cluster quality can be measured rather than eyeballed? A) yes; B) smaller set (~50); C) eyeball only.
+1. *Data:* it ties for the best leaf coherence (4.13), has no node outside the size bands at either level, and a top-level Gini of 0.147 against 0.417 for plain Ward.
+2. *README goals:* token-efficient (the taxonomy call reads 240 descriptions, labels read 7 items per node) and reproducible (Ward has no seed, micro-clusters are seeded, model calls are cached).
+3. *The user's design:* it is exactly the Grok + Jev split — Grok generates names, the decision model files items — and filing is where the hybrid without `decide()` went wrong.
+4. *Research:* BERTopic's lesson is kept (label from representatives, never from all items), and Jev's price ($0.042 per 1M input tokens) makes a per-item filing decision affordable where a Grok call per item is not.
+
+**Limits of this evidence.** The judge sample is 15 nodes per approach, so differences of about 0.3 in coherence are noise; the top five approaches are within that. The tree rating is a single call that sees labels, not contents, and it scored the pure-LLM taxonomy 4 against 3 for the chosen approach. The judge is the same model that wrote the descriptions. The final check is the user reading `best_groups.md`.
+
+## 7. Tree, multi-membership and size balancing
+
+**Data model.** `Node {id, label, parent_id, level, size}`; `Membership {item_id, node_id, kind: primary|secondary, score}`. Every item has exactly one primary membership (or Unclustered) and zero to two secondary ones. Sizes and balancing count primary members only, so multi-membership cannot inflate a node.
+
+**Size bands** (config, defaults from the experiment): 8–14 top branches; a top branch holds 3–15% of items; a second-level node holds 4–40 items. `n` scales the bands, not fixed counts.
+
+**Balancing loop** (deterministic, ran in the experiment with zero out-of-band nodes at the end):
+
+1. Split: any node above its upper band is cut in two with Ward on its own members; repeat until none is too large.
+2. Merge: the smallest node below its lower band joins the sibling with the nearest centroid, if the merged node stays within the band; repeat.
+3. Second level: per branch, cut a Ward tree at the k with the best silhouette inside `[ceil(m/40), min(12, m/8)]`, then run steps 1–2 with the leaf band.
+4. Review (decision model): for the closest sibling pairs ask "merge?", for the loosest nodes ask "split?". In the stand-in test the model said merge for 1 of 10 closest pairs and **split for 10 of 10 loosest nodes** — a yes-bias. So a split needs both a `noul` above threshold and a resulting pair that respects the lower band; merges are applied only inside the band. New nodes are named by Grok.
+
+**Unclustered.** Items whose similarity to their own node centroid is below mean − 2 sd, items the decision model answers "none of these fit" for, and (proposed, see open question 4) items still unsure after the homepage fetch. The chosen run applied the first two rules: 62 items (4.7%).
+
+**Multi-membership.** Two sources, both confirmed by a `noul` before they are stored:
+
+- *Second top branch:* the filing question may name one. The stand-in named one for 326 items (24.7%).
+- *Second node by similarity:* an item is a candidate for node B when it is at least as close to B's centroid as B's q-th percentile member. Candidates at q = 25 / 50 / 75: 14.2% / 3.9% / 0.8% of items. Of 40 sampled q=25 candidates the stand-in accepted 15 (38%), which projects to about **5% of items with two homes**.
+
+The two sources differ by a factor of five, so how generous to be is a user choice (open question 2). Listings mark secondary entries, e.g. `LinkedIn (also in: Social)`.
+
+## 8. Cost
+
+Prices: `grok-4.7` $2.00 input / $0.50 cached input / $6.00 output per 1M tokens, reasoning billed as output, Batch API 20% off (https://docs.x.ai/developers/pricing); Jev $0.042 per 1M input tokens, output free; OpenAI `text-embedding-3-small` $0.02 per 1M tokens.
+
+**One full run on 1,322 items, from measured token counts:**
+
+| Stage | Measured / arithmetic | Cost |
+| --- | --- | --- |
+| Describe (Grok) | 22,065 uncached in × $2 + 31,488 cached × $0.50 + 69,041 out × $6, per 1M | $0.474 |
+| Fetch + re-describe (Grok) | 246 unsure items with a domain × 23/40 usable pages ≈ 141 items; measured $0.0119 per 23 items | ≈ $0.073 |
+| Embeddings (OpenAI) | 13,873 tokens × $0.02 / 1M | $0.0003 |
+| Propose top branches (Grok) | 1 call ≈ 3,300 in + 3,600 out | ≈ $0.027 |
+| Label 99 second-level nodes (Grok) | 4 calls × $0.0108 (measured mean per 25-node call) | ≈ $0.043 |
+| **Grok + embeddings subtotal** | | **≈ $0.62** |
+| Routing (Jev) | 1,322 requests, ≈ 55k tokens | ≈ $0.002 |
+| Filing into a branch (Jev) | 1,322 requests × ≈ 515 tokens (item + 11 branch names and descriptions) ≈ 681k tokens | ≈ $0.029 |
+| Second-node checks (Jev) | 188 requests, ≈ 11k tokens | ≈ $0.0005 |
+| Merge/split review (Jev) | 99 requests, ≈ 19k tokens | ≈ $0.001 |
+| **Jev subtotal (estimated, not measured)** | ≈ 766k input tokens × $0.042 / 1M | **≈ $0.03** |
+| **Total with Jev** | | **≈ $0.65** |
+
+- **Same decisions on the Grok stand-in:** filing $0.476 (measured, 14 calls, 61k reasoning tokens) + second-node checks 228 pairs ÷ 40 × $0.017 ≈ $0.097 + review 99 ÷ 20 × $0.0154 ≈ $0.076 = **≈ $0.65**, for a run total of **≈ $1.27**. Jev makes the decision layer about 20× cheaper and halves the run. Gating filing by embedding margin (ask only the lower half) halves either figure.
+- **Batch API:** Grok subtotal × 0.8 ≈ $0.49, total ≈ $0.52 with Jev.
+- **v1 estimate was $0.63** without any decision layer; the describe stage came in at $0.47 instead of $0.40 because half of its output tokens were reasoning even at `low`.
+- Re-runs are free: every description, embedding, label and decision is cached on disk.
+
+**Actual experiment spend: $2.13 of the $3.00 budget** (`~/acct_cleanup/experiments/spend_ledger.json`): describe $0.474, fetch test $0.012, embeddings $0.0003, LLM taxonomies $0.285, node labels for ten approaches $0.371, judge $0.477, decision stand-in $0.508.
+
+## 9. Evaluation without a gold set
+
+- **Eyeball first:** an indented tree printout (top branch > node > items as `name (domain) — description`, long nodes truncated) written on every run. This is the primary acceptance check.
+- **Size report:** node counts, min/median/max per level, Gini, share of items in out-of-band nodes, unclustered share. Out-of-band share must be 0.
+- **LLM-judge spot checks:** coherence 1–5 and intruder detection on sampled nodes (30+ nodes for a release check, since 15 is noisy), plus one whole-tree rating. Use a different judge model from the describer when one is available.
+- **Internal metrics, used with care:** cosine silhouette and intra-node cosine compare cuts of the same algorithm only; they do not rank HDBSCAN (noise excluded) and cannot pick the number of nodes.
+- **Decision checks:** agreement between embedding filing and the decision model by margin quartile; accept rate of second-membership candidates; Jev versus the Grok stand-in on a 100-item sample once a key exists.
+- **Stability:** adjusted Rand index across embedding backends and across re-runs.
+- **Operational:** unsure rate, fetch success rate, actual tokens against §8.
+
+## 10. Config, CLI, privacy, tests
+
+- **Config:** `DescriptionConfig` (as v1); `EmbeddingConfig.backend = openai|local|fireworks|litellm|fake`; `ClusteringConfig.algorithm = kmeans|agglomerative|hdbscan`; new `TreeConfig {top_branches=(8,14), top_band=(0.03,0.15), leaf_band=(4,40), multi=off|conservative|liberal, multi_quantile=25}`; `DecisionConfig {backend=off|grok|typesafe|openrouter|cloudflare|hf, model, min_confidence}`; `LabelingConfig` gains `reasoning_effort`.
+- **CLI:** `constella organize INPUT... --output-dir DIR [--describe-model xai/grok-4.7] [--reasoning-effort low] [--batch] [--embedding openai|local] [--decision grok|typesafe|openrouter|cloudflare|hf|off] [--multi off|conservative|liberal] [--fetch on|off] [--cache-dir DIR] [--dry-run]`.
+- **From `account-clustering`:** keep ingest, privacy scrub, label cache, fake embeddings, export, CLI entry. Drop `rules.py`, the fixed taxonomy, and **all alias / product-split / tenant tables** (decision 6). Caller metadata stays out of the algorithm.
+- **Privacy:** chat and decision models receive the display name, the registrable domain, and on fallback the public homepage title and meta description. Titles containing an email address or phone number are replaced by the domain. Embedding models receive only the generated description text. Usernames, addresses, passwords, URL paths and query strings never leave the machine and are never placed in a `ContentUnit`.
+- **Tests (offline, fakes for chat, decision and embedding):** v1 list plus: balancing loop keeps every item and ends inside the bands; one primary membership per item; secondary memberships do not change sizes; `decide()` fake backend with low confidence falls back; "none of these fit" lands in Unclustered; filing gate asks the decision model only below the margin threshold.
+
+## 11. Milestones
+
+0. **Approval of this v2** and answers to the questions below. Nothing is built before this.
+1. Core: `algorithm` switch (K-Means default kept), Ward tree + balancing loop, `Node` / `Membership` models, tree printout. Offline tests.
+2. Description stage: batching, cache, homepage fallback, `--batch`.
+3. `decide()` interface with `grok` and `off` backends; filing gate; multi-membership.
+4. Jev backends (`typesafe`, `openrouter`; `cloudflare` and `hf` after) and a Jev-versus-stand-in check on 100 items.
+5. `constella.records` adapter and `constella organize` CLI.
+6. Real run on the full list (≈ $0.65 with Jev, ≈ $1.27 without), user review of the printed tree, README update.
+
+## 12. Open questions for the user
+
+1. **Jev access.** No TypeSafe or OpenRouter key is on this machine, so Jev was never called. Which do you want to provide?
+   A) `OPENROUTER_API_KEY` (no waitlist, `typesafe/jev-1.13`) — **recommended to start**;
+   B) `TYPESAFE_API_KEY` (direct, `jev-1.14.0`, early-access waitlist);
+   C) Cloudflare Workers AI credentials;
+   D) none for now: keep the Grok stand-in (about $0.65 more per full run).
+2. **How generous should multi-membership be?**
+   A) conservative: similarity candidates confirmed by the decision model, about 5% of items get a second home — **recommended**;
+   B) liberal: also accept the second branch the filing step names, about 25% of items;
+   C) off.
+3. **Size bands.** Defaults used: 8–14 top branches, each 3–15% of items; second-level nodes of 4–40 items (the run produced 11 branches and 99 nodes, median 11 items). Keep, or do you want fewer and larger nodes (for example 10–60) or a third level instead?
+4. **Unrecognised items.** 20% of descriptions were flagged unsure and the homepage fetch fixed 43% of a sample. For the rest:
+   A) send them straight to Unclustered — **recommended** (in the experiment they formed junk nodes such as "unidentified startups");
+   B) cluster them anyway on the guessed description.
+5. **Review point for the top level.** Should the run pause after Grok proposes the 8–14 branches so you can rename, add or remove branches before items are filed?
+   A) optional `--review-taxonomy` flag, off by default — **recommended**;
+   B) always pause;
+   C) never.
+6. **Embedding default.** A) OpenAI `text-embedding-3-small` ($0.0003 per run, the backend the results above were measured on) — **recommended**; B) local MiniLM ($0, descriptions stay on the machine, trees differ and were not judged); C) ask xAI support to enable embeddings for the team and re-probe.
+7. **Region-themed branches.** Embedding-only trees grouped services by country; the chosen approach organises by function with regional sub-folders inside. A) by function — **recommended**; B) allow a regional top branch.
