@@ -1,117 +1,191 @@
-# AI-First Clustering — Design Plan (v3)
+# AI-First Clustering — Design Plan (v3.1)
 
-Status: **design only, awaiting approval.** No code changes accompany this document. v3 turns the v2 open questions into decisions, replaces folders with a **multi-label taxonomy**, replaces size bands with a **data-driven split/merge test**, and reports a rerun on the real data with **real Jev calls** (2026-11-11). Scripts and outputs are outside the repo in `~/acct_cleanup/experiments/` (they contain personal service lists). The v2 text and its ten-approach comparison are in git at `156c176`. Base commit for the work is unchanged: `a905c64` (`v0.1.0`).
+Status: **design only, awaiting approval.** No code changes accompany this document. v3 replaced folders with a **multi-label taxonomy**, size bands with a **data-driven split/merge test**, and the Grok stand-in with **real Jev**. v3.1 adds an **MCP server**, an **iterative LLM ↔ Jev loop** that shrinks the unclustered set, and a test of a **constellation image tool**. All numbers come from runs on the real data (2026-11-11); scripts and outputs are outside the repo in `~/acct_cleanup/experiments/` because they contain personal service lists. The v2 text and its ten-approach comparison are in git at `156c176`. Base commit for the work: `a905c64` (`v0.1.0`).
 
 ## 1. Decisions
 
 | # | Decision |
 | --- | --- |
-| 1 | **Jev via TypeSafe direct** (`TYPESAFE_API_KEY`, `jev-1.14.0`). Grok writes text; Jev answers every closed question. `decide()` stays backend-pluggable; the Grok stand-in remains as fallback. |
-| 2 | **Labels, not folders.** An item carries one primary label and any number of extra labels. Labels form a DAG (a label may have several parents). Target: 5–15% of items with more than one label. |
-| 3 | **No size bands.** Granularity comes from the data: a label is split only when its members show sub-structure that beats a null and is stable (§5). |
-| 4 | Items still unrecognised after one homepage fetch go **straight to Unclustered**. Unclustered is an item status, not a label. |
-| 5 | The run **always pauses** after the top-level proposal; the user edits a YAML file and resumes (§4). |
-| 6 | **Embeddings:** OpenAI `text-embedding-3-small` by default; local MiniLM stays as `--embedding local`. |
-| 7 | **Region is never a topic.** It exists only as an optional facet label that is never primary. |
-| 8 | Unchanged from v2: `grok-4.7` at `reasoning_effort=low`; no alias or sibling-domain tables (dedup by identical registrable domain only); no gold set; records ingest stays a thin `constella.records` adapter; only names, registrable domains and generated descriptions leave the machine. |
+| 1 | **Hybrid, not LLM-only** (§2): embeddings locate and sample, an LLM writes descriptions and labels, Jev makes every per-item decision. |
+| 2 | **Constella is an MCP server** with seven tools (§4). The `constella organize` CLI drives the same tools with Grok as the built-in agent. |
+| 3 | **Labels, not folders.** One primary label and any number of extra labels per item; labels form a DAG. Target: 5–15% of items with more than one label. |
+| 4 | **Jev via TypeSafe direct** (`jev-1.14.0`). Every scoring request offers "Uncategorized / Miscellaneous". A label is confident at p ≥ **0.8** (§5). |
+| 5 | **Iterative loop:** items below the cutoff go back to the LLM as clusters with counts and samples, the LLM edits the labels, Jev re-scores; stop when an iteration moves under 10% of the pending items (§5). |
+| 6 | **No size bands.** A label is split only when its members show sub-structure that beats a null and is stable (§6). |
+| 7 | Items still unrecognised after one homepage fetch are **Unclustered** and do not shape the labels. Unclustered is an item status, not a label. |
+| 8 | The run **always pauses** after the top-level proposal for user review (§4.3). |
+| 9 | **Region is never a topic**, only an optional facet label that is never primary. |
+| 10 | Unchanged: `grok-4.7` at `reasoning_effort=low`; OpenAI `text-embedding-3-small`; no alias or sibling-domain tables; no gold set; thin `constella.records` adapter; only names, registrable domains and generated descriptions leave the machine. |
 
-## 2. Data model and outputs
+## 2. Hybrid or LLM-only
+
+**Chosen: hybrid.** The evidence:
+
+| Question | Measurement |
+| --- | --- |
+| Can embeddings decide alone? | No. The nearest top label by embedding equals Jev's best label for 69% of items. |
+| Can embeddings shortlist? | Yes. Jev's best top label is among the 6 nearest for 93.5% of items and the 8 nearest for 96.6%; of all labels Jev rates ≥ 0.8, 98.8% are among the 8 nearest. Asking 8 instead of all 19 cuts filing from 2,576 to about 1,050 tokens per item. |
+| Can an LLM make the per-item decisions? | It can, at 4× the price: Grok filed 1,322 items for $0.476; Jev for $0.126, with 87.8% identical answers (§7). |
+| Can an LLM build every level? | In v2 the LLM-only two-level taxonomy had the lowest coherence (3.60 against 4.13) and the lowest silhouette of ten approaches. |
+| Is an LLM proposal reproducible? | No. The same prompt run twice gave 19 and 14 top labels, and the two item partitions agree at an adjusted Rand index of only 0.45. Hence the pause, and a deterministic test for the lower levels. |
+| What does the LLM need to read? | An overview of 68 clusters with counts and 2–6 samples each is 3,600 tokens for 1,161 items, and grows with √N. All descriptions would be about 16,000 tokens and grow with N. |
+
+Embeddings cost $0.0003 per run. They are never the judge, only the index: they build the overview, shortlist candidate labels, drive the split test and draw the map.
+
+## 3. Data model and outputs
 
 ```text
-Item        {id, name, domain, description, status: labeled | unclustered_unrecognised | unclustered_no_fit}
-Label       {id, name, description, parents: [label_id], facet: topic | region, origin: grok | split | user, centroid}
+Item        {id, name, domain, description,
+             status: labeled | tentative | unclustered_no_fit | unclustered_unrecognised}
+Label       {id, name, description, parents: [label_id], facet: topic | region,
+             origin: proposed | split | loop | user, centroid}
 Assignment  {item_id, label_id, p, source: jev_noul | jev_choice | embed | user, is_primary}
 ```
 
-Rules: the label graph is acyclic; ancestors are implied and never stored as assignments; an item has at most one primary assignment and it is always a topic label; facet labels are never primary and do not count as "multi-label"; an item may sit directly on a parent label when no child fits.
+- The label graph is acyclic. Ancestors are implied and never stored as assignments.
+- An item has at most one primary assignment, always a topic label. Facet labels are never primary and do not count as multi-label.
+- `labeled`: best label p ≥ cutoff. `tentative`: best p between 0.5 and the cutoff; the label is kept, flagged, and the item returns to the loop. `unclustered_no_fit`: Jev chose Miscellaneous or nothing reached 0.5. `unclustered_unrecognised`: description still unsure after the homepage fetch.
+- There is no Miscellaneous label in the taxonomy. It exists only as an answer option, and choosing it sets a status.
 
-Files written to the run directory:
+Files in the run directory: `labels_proposed.yaml` (review artifact), `labels.yaml` (the DAG with counts), `assignments.csv` (item × label × p), `taxonomy.md` (indented tree, counts, 5–8 samples per label, multi-parent labels printed under each parent with `(also under: …)`), `items.csv` (item → status, primary, other labels, facets), `constellation.png` (optional), `manifest.json` (config, models, stage status, tokens and cost).
 
-| File | Content |
-| --- | --- |
-| `labels_proposed.yaml` | review artifact for the pause (§4) |
-| `labels.yaml` | the DAG: id, name, description, parents, facet, origin, counts (direct, primary, incl. descendants) |
-| `assignments.csv` | one row per item × label: `item_id, name, domain, label_id, p, source, is_primary` |
-| `taxonomy.md` | indented tree with counts and 5–8 sample members per label; a multi-parent label is printed under each parent with `(also under: …)` |
-| `items.csv` | item view: description, status, primary label, other labels with p, facets |
-| `manifest.json` | config, model ids, stage status, token counts and cost per stage |
+## 4. MCP server
 
-## 3. Algorithm
+### 4.1 Tools
+
+All state lives in the run directory; tools take a `run_id` and return counts and samples, never the full item list.
+
+| Tool | Calls | Input (brief) | Output (brief) | Response budget | Cost |
+| --- | --- | --- | --- | --- | --- |
+| `ingest` | none | `{records_path \| texts[], format}` | `{run_id, items, deduped}` | ≤ 150 tokens | $0 |
+| `describe` | Grok, HTTP, OpenAI | `{run_id, scope: new \| unsure, fetch: bool}` | `{described, unsure, unrecognised, cost_usd}` | ≤ 150 tokens | $0.36 per 1,000 items; fetch pass $0.06 per 1,000 |
+| `overview` | none | `{run_id, scope: all \| pending \| label:<id>, max_groups, samples}` | `{totals: {labeled, tentative, no_fit, unrecognised}, groups: [{id, name?, parents, n, n_pending, nearest_labels[], samples[], split?: {k, stability}, merge_with?: id}]}` | default ≤ 4,000 tokens, hard cap 8,000 | $0 |
+| `render` | none | `{run_id, scope}` | PNG ≤ 1000×800: 2-D map, cluster ids and counts, no item names | about 800 image tokens | $0 |
+| `apply_labels` | none | `{run_id, ops: [{op: add \| rename \| redefine \| merge \| delete \| set_parents \| split, …}]}` | `{applied, rejected: [{op, reason}], changed_labels[], needs_approval}` | ≤ 300 tokens | $0 |
+| `score` | Jev | `{run_id, scope: changed \| pending \| all, cutoff: 0.8, candidates: 8}` | `{scored, labeled, tentative, no_fit, moved, by_label: [{id, gained}], p_histogram[10], converged, cost_usd}` | ≤ 400 tokens | $0.04–0.11 per 1,000 items |
+| `export` | none | `{run_id}` | `{paths, summary}` | ≤ 200 tokens | $0 |
+
+- `overview` is the "tree with counts". Before labels exist its groups are embedding clusters (2·√n of them); afterwards they are labels, and `scope: pending` clusters only the items below the cutoff. Each group carries its size, the nearest existing labels and a few samples (`name — description`). Groups that pass the split test (§6) carry `split`, and label pairs that pass the merge test carry `merge_with`, so the agent sees data-backed suggestions and does not have to guess.
+- `apply_labels` is how any agent edits the polyhierarchy. `split` accepts the server's proposed cut of a label; the agent then names the children with `rename` after reading `overview(scope: label:<id>)`. `set_parents` gives a label a second parent.
+- `score` asks Jev one request per item: one `noul` per candidate label (the nearest by embedding plus every label changed since the last call) and one `choice` over the same candidates that always includes `uncategorized_miscellaneous`. Answers are cached by question text, so an unchanged (item, label) pair is never asked twice.
+- "Get unclustered" is `overview(scope: pending)`; it is not a separate tool.
+
+### 4.2 Agent loop
 
 ```text
- 1. ingest + dedup        URL -> registrable domain; identical domain -> one item           [deterministic]
- 2. describe              name + domain -> 3-10 word description, confidence, unsure        [Grok, 50/call]
- 3. fetch + re-describe   unsure items only: GET homepage, title + meta description         [HTTP, Grok 40/call]
- 4. unclustered #1        still unsure -> status unclustered_unrecognised, leaves the run
- 5. embed                 "name — description"                                              [OpenAI]
- 6. propose top level     size-stratified sample, N stated, no count asked                  [Grok, 1 call]
- 7. PAUSE                 write labels_proposed.yaml, exit                                  [user edits]
- 8. resume: file items    one Jev request per item, one noul per top label                  [Jev]
- 9. build lower levels    recursive split test per label; merge test across labels          [deterministic + Jev veto]
-10. name labels           6-7 representatives per new label, siblings in one call           [Grok]
-11. extra parents         noul per (label, nearby top label) -> polyhierarchy               [Jev]
-12. assign labels         top-8 candidate sub-labels by embedding, one noul each            [Jev, 1 request/item]
-13. primary / extras      thresholds on p (§6); nothing reaches 0.5 -> unclustered_no_fit
-14. export                files of §2
+ingest -> describe(fetch: true)
+overview(all) [+ render]            agent proposes top-level labels
+apply_labels(add ...)               -> needs_approval: true
+-- PAUSE: user reviews labels_proposed.yaml --
+score(all)
+repeat:
+    overview(pending)               counts + samples of what did not fit
+    apply_labels(add | redefine | split | merge | set_parents)
+    score(changed)                  only new or changed questions are asked
+until score.converged
+export
 ```
 
-Step 6 input: items are micro-clustered (k = 2·√N) only to build the sample; Grok sees each micro-cluster's size and 2–6 typical descriptions, never the full list. Plain text corpora skip steps 1–4. With `--decision off` step 8 uses nearest label by embedding (`source: embed`) and steps 11–13 use similarity quantiles, so an offline path remains.
+Per iteration the agent reads at most one overview (≤ 4,000 tokens) and one score summary (≤ 400 tokens) and writes a list of operations. Measured with Grok as the agent: 3,800–4,000 input and 1,400–3,600 output tokens per iteration, $0.014–0.028. Any MCP client (Claude, Grok, another agent) can run the loop alongside its own tools. `constella organize` runs the same loop with `grok-4.7`.
 
-## 4. The pause: review artifact and resume
+### 4.3 The pause
 
-`constella organize INPUT... --output-dir RUN` runs steps 1–6, writes `RUN/labels_proposed.yaml`, prints the path and exits. There is no CLI flag to skip the pause; the Python API takes the approved label list as an argument, which is what tests use.
+The first `apply_labels` that creates top-level labels writes `labels_proposed.yaml` and puts the run in `awaiting_approval`; `score` refuses to run until the user approves. Approval comes from the user, not the agent: through an MCP elicitation prompt where the client supports it, otherwise by editing the file and running `constella organize --resume RUN` (or calling `score` again once the file says `approved: true`).
 
 ```yaml
 n_items: 1161
-approved: false          # set to true, or just run --resume
+approved: false
 labels:
   - id: banking_and_investing
     name: "Banking and investing"
     description: "Retail banks, credit cards, credit scores, neobanks, and cryptocurrency exchanges."
     facet: topic
-    estimated_size: 33   # nearest-label count by embedding, before filing
+    estimated_size: 33   # nearest-label count by embedding, before scoring
     sample_members: ["Bank of America (bankofamerica.com) — ...", ...]
 ```
 
-The user may rename a label, edit a description, delete a label, add one (`id`, `name`, `description`), or merge with `merge_into: <id>`. `estimated_size` and `sample_members` are informational and ignored on read.
+The user may rename, edit a description, delete, add, or merge with `merge_into: <id>`. On resume everything already computed is reused (descriptions, pages, embeddings, cached Jev answers); only questions about new or edited labels are asked, and lower levels are rebuilt only for labels whose membership changed. New top-level labels proposed later by the loop are applied but listed for review in the same file (open question 4). In the experiment the proposal was accepted unchanged (approval simulated).
 
-`constella organize --resume RUN` validates the file (unique ids, non-empty descriptions, merge targets exist) and continues at step 8.
+## 5. The LLM ↔ Jev loop
 
-- **Reused from cache:** entities, descriptions, fetched pages, embeddings, and every Jev answer whose question text is unchanged. The cache key is the hash of (model, state, question), and each top label is its own `noul`, so editing or adding one label costs one new question per item, not a re-filing.
-- **Recomputed:** nouls for new or edited labels, the lower levels of any label whose membership changed, their names, extra parents, and sub-label assignment.
-- `--resume` can be run again after editing `labels.yaml` (the full DAG); only the affected questions are asked again.
+**Scoring rule.** An item is `labeled` when Jev's `choice` is not Miscellaneous and its best `noul` is ≥ the cutoff. Extra labels need p ≥ 0.85 (§8).
 
-In the experiment the proposal was accepted unchanged (approval simulated).
+**Calibrating the cutoff without a gold set.** Three measurements on the current run, all repeatable on any data:
 
-## 5. Data-driven granularity (replaces size bands)
+| Cutoff | Confident (of 1,161 recognised) | Pending | Audit of the band just below |
+| --- | --- | --- | --- |
+| 0.5 | 1,093 | 5.9% | – |
+| 0.7 | 1,004 | 13.5% | p in [0.5, 0.7): 9 of 20 correct |
+| **0.8** | **934** | **19.6%** | p in [0.7, 0.8): 12 of 20 correct |
+| 0.9 | 766 | 34.0% | p in [0.8, 0.9): 17 of 20 correct |
+| 0.95 | 555 | 52.2% | p in [0.9, 1.0]: 20 of 20 correct |
 
-Two numbers are derived from N and used only as soft priors: **√N** (a hint in the top-level prompt: an area expected to hold fewer items is usually a sub-label) and **s = ½·log₂N** (a group smaller than s is not worth its own label; a label needs 2·s members before a split is tried). For N = 1,161 these are 34 and 5.
+1. *Distribution:* the share of items below each cutoff (columns 2–3).
+2. *Audit by band:* 20 items per probability band, judged strictly by `grok-4.7` with the probability hidden (column 4). Weighted by band size, labels accepted at 0.8 are about 97% correct, at 0.5 about 91%.
+3. *Re-ask noise:* when the loop re-asked unchanged labels with slightly different wording, 51 items crossed 0.8. Probabilities within about ±0.05 of the cutoff are therefore noise, which is why unchanged questions are served from cache and why `tentative` items keep their label.
 
-**Top level.** Grok proposes it with N stated and no count requested. Finding: with no size hint at all Grok returned 41 fine-grained labels (median estimated share 2%); with the √N hint it returned 19. The hint is advisory and the user edits the result at the pause.
+**0.8 is the default**: it is the lowest cutoff whose accepted band is judged at least 85% correct, and 0.9 would send a third of the items back for a 3-point gain in precision. The audit is 20 items per band, so each figure carries roughly ±20 points; `score` reports the histogram and the CLI can rerun the audit (`--audit`, about $0.04).
 
-**Split test** (per label, on its primary members):
+**Stopping rule.** Stop when an iteration moves fewer than 10% of the pending items to `labeled`, when the agent returns no operations, after 5 iterations, or at the budget limit.
+
+**Measured: three iterations on the pending set at cutoff 0.8** (real Jev, Grok as the agent):
+
+| Iteration | LLM operations | Pending before | Newly labeled | Of those, on new or rewritten labels | Pending after | LLM cost | Jev cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 4 new sub-labels, 1 definition rewritten | 227 | 75 | 26 | 152 | $0.022 | $0.023 |
+| 2 | 3 new labels (2 top-level) | 152 | 19 | 17 | 133 | $0.014 | $0.011 |
+| 3 | 1 new sub-label, 2 definitions rewritten | 133 | 11 (8%, stop) | 11 | 122 | $0.028 | $0.008 |
+
+- Pending fell from **227 to 122** (19.6% → 10.5% of recognised items); labeled rose from 934 to 1,039. Loop cost: **$0.106** (LLM $0.064, Jev $0.042).
+- Honest attribution: 54 of the 105 moves landed on labels the LLM added or rewrote. The other 51 are the re-ask noise described above and would not occur in the designed loop, which never re-asks an unchanged question. The conservative result is 227 → 173 (14.9%).
+- New labels were sensible: connected-device clouds, rewards and cashback, non-health insurance, technology product companies, uptime and error monitoring, grocery delivery, course-creator platforms, health information.
+- Audit of 20 loop placements: 17 correct, the same rate as the [0.8, 0.9) band.
+- **Unrecognised items stay out.** As a test, the 161 unrecognised items were scored on their guessed descriptions: 79 reached 0.8, but only 13 of 20 audited were correct and 5 could not be judged. That is too weak to label them silently (open question 3).
+
+## 6. Data-driven granularity
+
+Two numbers derived from N act as soft priors only: **√N** (a hint in the top-level prompt: an area expected to hold fewer items is usually a sub-label) and **s = ½·log₂N** (a group smaller than s is not worth its own label; a label needs 2·s members before a split is tried). For N = 1,161 they are 34 and 5.
+
+**Top level.** The LLM proposes it with N stated and no count requested. Without any hint Grok returned 41 fine-grained labels; with the √N hint, 19.
+
+**Split test** (per label, on its primary members; reported by `overview`):
 
 1. Cut a Ward tree of the members at every k from 2 to m/s and compute the silhouette.
 2. Build a null: the same members with each principal-component column permuted independently (same variance spectrum, no joint structure), 30 replicates, same cuts.
-3. One max-statistic test over all k: the split is considered only if the best standardised gap (real − null) exceeds that of every null replicate (p ≤ 0.05). This corrects the v2 problem that raw silhouette always prefers the largest k, because the null rises with k too.
-4. Choose the smallest k whose gap is within one null standard deviation of the best gap (the gap-statistic 1-SE rule) **and** whose partition is stable: mean adjusted Rand index ≥ 0.6 against re-clustering ten 80% subsamples.
-5. Children smaller than 3 items are not created; those items stay directly on the parent.
-6. A Jev `noul` ("are these sub-groups distinctly different kinds of services?") can veto. It can never cause a split.
-7. Recurse into each child. Recursion ends when no cut passes or the child has fewer than 2·s members.
+3. One max-statistic test over all k: the best standardised gap (real − null) must exceed that of every null replicate (p ≤ 0.05). This fixes the v2 problem that raw silhouette always prefers the largest k, because the null rises with k too.
+4. Choose the smallest k whose gap is within one null standard deviation of the best (the gap-statistic 1-SE rule) and whose partition is stable: mean adjusted Rand index ≥ 0.6 against re-clustering ten 80% subsamples.
+5. Children under 3 items are not created; those items stay directly on the parent.
+6. A Jev `noul` can veto a split, never cause one. Recurse until no cut passes or a child has fewer than 2·s members.
 
-**Merge test.** Two labels are candidates when their separation is below their cohesion: mean cross-similarity ≥ the smaller of the two mean within-similarities. A Jev `noul` must agree. A merge across parents yields one label with two parents.
+**Merge test.** Two labels are candidates when separation is below cohesion (mean cross-similarity ≥ the smaller mean within-similarity); a Jev `noul` must agree. A merge across parents yields one label with two parents.
 
-**Measured** (details in Appendix B): 11 of 19 top labels were split (k from 4 to 19); 8 were left whole, 7 because no cut beat the null and 1 (an 82-item AI-tools label) because cuts beat the null but none was stable. No second-level split passed, so the taxonomy has two levels. Only 4 of 5,995 label pairs were merge candidates and Jev rejected all 4. Resulting sizes: top labels 20–159 items (median 59, largest 14% of labeled items, Gini 0.29); sub-labels 3–15 items (median 7, Gini 0.23); 97 items sit directly on a top label that has children.
+**Measured** (Appendix B): 11 of 19 top labels were split (k from 4 to 19); 8 were left whole, 7 because no cut beat the null and 1 (an 82-item AI-tools label) because no cut was stable. No second-level split passed, so the taxonomy has two levels. 4 of 5,995 label pairs were merge candidates; Jev rejected all 4. Sizes: top labels 20–159 items (median 59, largest 14% of labeled items, Gini 0.29); sub-labels 3–15 items (median 7, Gini 0.23).
 
-## 6. Multi-label method and calibration
+## 7. Jev, measured
 
-Every (item, label) pair that matters gets an independent Jev `noul`: all top labels at filing, then the 8 nearest sub-labels anywhere in the DAG (TypeSafe's "one Noul per option" pattern, since a `choice` always picks exactly one).
+**Probe.** `GET /v1/models` → 200, lists `jev-latest` and `jev-preview`. `jev-1.14.0` is not listed but accepted. `questions` must be an object keyed by question id (a list returns 422). The response has `answers` and `usage {input_tokens, output_tokens}`; no cost field, no rate-limit headers.
 
-- **Primary:** the highest-p label with p ≥ 0.5 after removing implied ancestors. If no noul reaches 0.5, the `choice` answer is used when its confidence is ≥ 0.5 (35 items); otherwise the item is `unclustered_no_fit`.
-- **Extra labels:** every other label with p ≥ τ that is not an ancestor of a kept label.
-- **Region facets:** p ≥ 0.8, stored separately.
+**Cost and latency.** 4,550 requests, 7.67M input tokens, **$0.321** in total. Per request: **p50 0.14–0.15 s, p95 0.23–0.25 s**, max 1.1 s. At 8 concurrent requests 1,161 items take **24 s**. **No 429/529, no retries, no failed requests.** Tokens scale with the number of questions (about 115 each for a 15-word state), so asking only candidate labels is what keeps cost down.
 
-| τ (extra-label threshold) | items with 2+ labels | % of labeled items | % of all items | % with labels under two top labels |
+**Agreement with the v2 Grok stand-in** (identical questions; stand-in answers from the v2 cache):
+
+| Question | n | Same answer | Notes |
+| --- | --- | --- | --- |
+| Branch filing, 11 v2 branches + "none" | 1,322 | **87.8%** (Cohen's κ 0.87) | by embedding-margin quartile 77 / 87 / 92 / 96%; Jev confidence < 0.5 → 49%, ≥ 0.9 → 99% |
+| Second-membership yes/no | 40 | 82.5% | r = 0.82 |
+| Merge two nodes | 10 | 90% | |
+| Split a node | 10 | 100% | both said yes to all 10 |
+
+- Jev abstains more often: "no folder fits" for 86 items against Grok's 30.
+- Grok's free-form "second folder" was generous: Jev rates only 40% of Grok's 326 picks at ≥ 0.5. Independent nouls with a threshold give a tunable multi-label rate.
+- The split yes-bias holds for both models; in v3 the Jev veto fired 0 times in 11. The data test does the selecting.
+- Name bias: the label "Identity and security" attracted sign-in pages of unrelated services (a retailer's sign-in page got it as primary at p = 0.96). See open question 8.
+
+## 8. Multi-label calibration
+
+Every candidate label gets its own `noul` (TypeSafe's "one Noul per option" pattern), so an item can pass several. Extra labels are those with p ≥ τ that are not ancestors of a kept label. Region facets need p ≥ 0.8 and are stored separately.
+
+| τ | Items with 2+ labels | % of labeled items | % of all items | % with labels under two top labels |
 | --- | --- | --- | --- | --- |
 | 0.50 | 535 | 47.4 | 40.5 | 30.5 |
 | 0.60 | 397 | 35.2 | 30.0 | 20.6 |
@@ -122,140 +196,139 @@ Every (item, label) pair that matters gets an independent Jev `noul`: all top la
 | 0.90 | 60 | 5.3 | 4.5 | 3.0 |
 | 0.95 | 24 | 2.1 | 1.8 | 1.3 |
 
-The 5–15% target corresponds to τ between 0.80 and 0.90; the default is **τ = 0.85**. Twenty-five examples by probability band are in `~/acct_cleanup/experiments/multi_label_examples.md`. Typical extras at ≥ 0.85: an AI design tool also under design software; a recruiting system also under HR software; a stock-media marketplace also under creator marketplaces. Below about 0.7 extras are mostly sibling sub-labels of the primary.
+The 5–15% target corresponds to τ between 0.80 and 0.90. Examples by probability band: `~/acct_cleanup/experiments/multi_label_examples.md`. Multi-parent labels are rare here: of 330 (sub-label, other top label) questions one reached 0.7 (used-car marketplaces, under Travel and also Shopping).
 
-**Polyhierarchy at label level** is rare in this data: of 330 (sub-label, other top label) questions one reached 0.7 (used-car marketplaces, under Travel and also under Shopping). Six reach 0.5, but two of those are wrong.
+## 9. Does the image tool help?
 
-## 7. Grok and Jev: division of labour, measured
+**Test.** A 1000×800 PNG of the UMAP map (1,161 points coloured by 68 clusters, `id:count` at each cluster, no item names) was given to `grok-4.7` with vision together with the text overview, and compared with the text overview alone, run twice to measure run-to-run noise.
 
-| Step | Model | Shape |
-| --- | --- | --- |
-| Describe, re-describe from homepage | Grok | generation |
-| Propose top level; name new labels | Grok | generation, representatives only |
-| File into top labels | Jev | one `noul` per top label; `choice` as fallback |
-| Assign sub-labels and extra labels | Jev | one `noul` per candidate |
-| Split veto, merge confirmation, extra parents | Jev | `noul`, state = label descriptions + 5 representatives |
+| Arm | Top labels | Input tokens | Cost | Agreement with text run A (ARI) | Blind judge, sum of three 1–5 scores |
+| --- | --- | --- | --- | --- | --- |
+| Text only, run A | 19 | 3,603 | $0.038 | – | 12 |
+| Text only, run B | 14 | 3,603 | $0.036 | 0.45 | 10–11 |
+| Text + image | 21 | 4,495 (802 for the image) | $0.047 | 0.50 | 13–14 |
 
-**Probe.** `GET /v1/models` → 200, lists `jev-latest` and `jev-preview`. `jev-1.14.0` is not listed but accepted. `questions` must be an object keyed by question id (a list returns 422). The response has `answers` and `usage {input_tokens, output_tokens}`; no cost field and no rate-limit headers.
+- The judge preferred the image arm in all four comparisons (both orders, against both text runs).
+- The evidence is weak. It is one image run. The two text-only runs differ from each other as much as either differs from the image run. The judge's reasons mostly praise finer separation, and the image arm also had the most labels.
+- A second signal points the same way: labels proposed with the image group clusters that sit closer together on the map (spread ratio 0.30 against 0.35 and 0.47).
+- The image adds about 800 input tokens ($0.002). Test cost: $0.19.
 
-**Cost and latency (real).** 3,838 requests, 6.66M input tokens, **$0.279**, including the agreement study. The two per-item stages of one run: filing 1,161 requests × 22 questions = 2.99M tokens, $0.126; sub-label assignment 1,161 × 8 questions = 1.10M tokens, $0.046. Latency per request: **p50 0.14–0.15 s, p95 0.23–0.25 s**, max 1.1 s. Wall time at 8 concurrent requests: **24 s per 1,161 items** (about 48 requests/s). **No 429/529, no retries, no failed requests.** Tokens scale with the number of questions (about 115 per question for a 15-word state), so the state is in effect billed once per question; asking only candidate labels matters more than shortening the state.
+**Verdict:** keep `render` as an **optional** tool. It is cheap, it did no harm, it may help the proposal slightly, and the same PNG is useful to the person at the pause. The loop does not depend on it and text-only clients lose nothing measurable.
 
-**Agreement with the v2 Grok stand-in** (identical questions; stand-in answers read from the v2 cache):
+## 10. Results of the v3 run
 
-| Question | n | Same answer | Notes |
-| --- | --- | --- | --- |
-| Branch filing, 11 v2 branches + "none" | 1,322 | **87.8%** (Cohen's κ 0.87) | by embedding-margin quartile 77 / 87 / 92 / 96%; by Jev confidence: <0.5 → 49%, 0.5–0.7 → 59%, 0.7–0.9 → 82%, ≥0.9 → 99% |
-| Second-membership yes/no | 40 | 82.5% | Jev 14 yes, Grok 15 yes; r = 0.82 |
-| Merge two nodes | 10 | 90% | Jev 2 yes, Grok 1 yes |
-| Split a node | 10 | 100% | both said yes to all 10 |
+1,322 entities; descriptions and embeddings reused from v2.
 
-Consequences for the design:
-
-- Jev can replace the stand-in; disagreement concentrates where Jev's own confidence is below 0.7 (263 items), which is the set to show in a review list.
-- Jev abstains more: "no folder fits" for 86 items against Grok's 30.
-- Grok's "second folder" was generous: Jev's independent noul for the same folder is ≥ 0.5 for 40% of Grok's 326 picks and ≥ 0.85 for 6%. Per-label nouls with a threshold give a tunable rate; a free-form second pick does not.
-- The split yes-bias is real for both models, and in v3 the Jev veto fired 0 times in 11. The data test does the selecting; the veto is kept only because it costs $0.0004 per run.
-- Name bias ("Type-Safe Is Not Error-Free"): the label "Identity and security" attracted login and sign-in pages of unrelated services (a retailer's sign-in page got it as primary with p = 0.96). See open question 4.
-
-## 8. Results of the v3 rerun
-
-1,322 entities, descriptions and embeddings reused from v2.
-
-- **Homepage fetch for all 271 unsure items** (20 have no domain): 162 pages returned a title or meta description; **110 became confident**; **161 (12.2%) are Unclustered as unrecognised**.
-- **Labeled: 1,128 items (85.3%). Unclustered: 14.7%** = 12.2% unrecognised + 2.5% (33 items) where no label reached 0.5.
-- **Taxonomy:** 19 top labels, 110 sub-labels, 1 multi-parent label, 2 region facets (India 168 items, United States 176). Top labels and counts are in Appendix A.
-- **Multi-label rate: 9.8% of labeled items** (110 items; 4 have three labels); 5.1% carry labels under two different top labels.
-- **Judge spot check** (`grok-4.7` low): 15 labels, mean coherence 3.93 / 5 (v2's chosen tree: 4.13 on 15 nodes; the difference is within noise), name fits the members for 10 of 15; 15 extra-label assignments: primary correct 15 of 15, extra correct 14 of 15.
-- **Known errors:** the login-page bias above; two junk-drawer sub-labels (a "mobility extras" label mixing parking, lounges and postal services; an email-marketing label holding unrelated senders); the 82-item AI-tools label has no sub-labels.
+- **Homepage fetch for all 271 unsure items:** 162 pages usable, **110 became confident**, **161 (12.2%) unrecognised**.
+- **Taxonomy:** 19 top labels, 110 sub-labels, 1 multi-parent label, 2 optional region facets; the loop added 8 labels (2 top-level). Top labels and counts: Appendix A.
+- **At the v3 acceptance rule** (best p ≥ 0.5): 1,128 items labeled (85.3%), **14.7% Unclustered** (12.2% unrecognised + 2.5% no fit). Multi-label rate **9.8%** of labeled items.
+- **At cutoff 0.8:** 934 recognised items labeled before the loop and 1,039 after it (89.5% of recognised, 78.6% of all); 122 remain pending, most of them `tentative` with a kept label.
+- **Judge spot checks:** 15 labels, mean coherence 3.93 / 5, name fits for 10 of 15; 15 extra-label assignments: primary correct 15, extra correct 14.
+- **Known errors:** the sign-in bias (§7); two junk-drawer sub-labels; the 82-item AI-tools label has no sub-labels.
 
 Listing: `~/acct_cleanup/experiments/experiment_labels.md`.
 
-## 9. Cost
+## 11. Cost
 
-Prices: `grok-4.7` $2.00 in / $0.50 cached in / $6.00 out per 1M tokens (reasoning billed as output); Jev $0.042 per 1M input tokens, output free; OpenAI embeddings $0.02 per 1M tokens.
+Prices: `grok-4.7` $2.00 in / $0.50 cached in / $6.00 out per 1M tokens (reasoning billed as output); Jev $0.042 per 1M input tokens; OpenAI embeddings $0.02 per 1M tokens.
 
-**One full run on 1,322 items (all measured):**
-
-| Stage | Cost |
+| Stage of one run on 1,322 items (measured) | Cost |
 | --- | --- |
-| Describe (Grok, 27 calls; v2 measurement) | $0.474 |
+| Describe (Grok, 27 calls) | $0.474 |
 | Fetch + re-describe 162 pages (Grok, 5 calls) | $0.077 |
-| Embeddings (OpenAI) | $0.0003 |
+| Embeddings | $0.0003 |
 | Propose top level (Grok, 1 call) | $0.053 |
 | Name 110 sub-labels (Grok, 5 calls) | $0.089 |
-| File into top labels (Jev) | $0.126 |
-| Sub-label assignment (Jev) | $0.046 |
-| Split veto, merge check, extra parents (Jev, 125 requests) | $0.003 |
-| **Total** | **≈ $0.87** (Grok $0.69, Jev $0.175) |
+| Score against top labels (Jev) | $0.126 |
+| Score against sub-labels (Jev) | $0.046 |
+| Split veto, merge check, extra parents (Jev) | $0.003 |
+| Loop, 3 iterations (Grok $0.064, Jev $0.042) | $0.106 |
+| **Total** | **≈ $0.97** |
 
-Describing is 55% of the run and is paid once; a re-run after editing labels costs only the Jev rows it invalidates (at most $0.175). Asking only the 6 nearest top labels instead of all 19 would cut filing to about $0.04. The same decisions on the Grok stand-in cost about $0.65 in v2.
+Describing is half the run and is paid once. Shortlisting 8 top labels by embedding would cut top-label scoring from $0.126 to about $0.05. When another agent drives the MCP tools, the proposal, naming and loop-LLM rows ($0.21) move to that agent's own token bill.
 
-**Actual v3 experiment spend: $0.58 of the $3.00 budget** (`spend_ledger_v3.json`): Grok $0.302 (re-describe $0.077, two top-level proposals $0.109, naming $0.089, judge $0.028), Jev $0.279 (run $0.175, agreement study $0.103), embeddings < $0.001.
+**Actual v3 experiment spend: $0.94 of the $3.00 budget** (`spend_ledger_v3.json`): Grok $0.622 (re-describe $0.077, top-level proposals $0.109, naming $0.089, judge and audits $0.094, loop $0.064, image test $0.190), Jev $0.321 (run $0.175, agreement study $0.103, loop $0.042), embeddings < $0.001.
 
-## 10. Evaluation without a gold set
+## 12. Evaluation without a gold set
 
-- **Read the tree:** `taxonomy.md` and `items.csv` are the acceptance check; the pause is the first checkpoint.
-- **Structure report on every run:** labels per level, size distribution, split-test table (which labels split, k, z, stability, which did not and why), merge candidates, multi-label rate against the threshold table, unclustered share by reason.
-- **Review list:** items whose primary p or `choice` confidence is below 0.7, and extra labels with p within 0.05 of τ.
-- **LLM-judge spot checks:** label coherence and name fit, extra-label correctness; 30+ samples for a release check, with a judge model other than the describer when available.
-- **Stability:** re-run the split test with another seed and compare; adjusted Rand index across embedding backends.
-- **Operational:** unsure rate, fetch success, Jev error and retry counts, tokens against §9.
+- **Read the tree:** `taxonomy.md` and `items.csv`; the pause is the first checkpoint.
+- **Every run reports:** labels per level, size distribution, the split-test table, merge candidates, the p histogram, pending share per iteration, multi-label rate, unclustered share by reason.
+- **Cutoff audit:** 20 items per probability band judged with p hidden (§5), ideally by a model other than the describer.
+- **Review list:** `tentative` items and extra labels within 0.05 of τ.
+- **Spot checks:** label coherence and name fit, extra-label correctness; 30+ samples for a release.
+- **Stability:** rerun the split test with another seed; rerun the top-level proposal and compare (ARI 0.45 between two runs today, which is why the user approves it).
+- **Operational:** unsure rate, fetch success, Jev errors and retries, tokens against §11.
 
-## 11. Config, CLI, privacy, tests
+## 13. Config, privacy, tests
 
-- **Config:** `DescriptionConfig`; `EmbeddingConfig.backend = openai|local|fake`; `DecisionConfig {backend = typesafe|grok|off, model = jev-1.14.0, concurrency = 8, max_retries = 6}`; `TaxonomyConfig {extra_threshold = 0.85, primary_threshold = 0.5, candidates = 8, split_alpha = 0.05, split_stability = 0.6, null_replicates = 30, parent_threshold = 0.7, facets = []}`.
-- **CLI:** `constella organize INPUT... --output-dir RUN [--embedding openai|local] [--decision typesafe|grok|off] [--extra-threshold 0.85] [--facets region] [--fetch on|off] [--dry-run]`, then `constella organize --resume RUN`.
-- **Jev client:** plain HTTPS, questions as an object, exponential backoff with jitter on 429/529/5xx, non-retryable on 4xx, every response cached on disk, key-shaped strings redacted from stored error bodies.
-- **Privacy:** Grok, Jev and OpenAI receive only the display name, the registrable domain, the generated description, and on fallback the public homepage title and meta description (titles containing an email address or phone number are stripped). Usernames, addresses, URL paths and query strings never leave the machine.
-- **Tests (offline, fakes for chat, decision and embedding):** split test rejects structureless data and accepts planted clusters; no item is lost by split or merge; ancestors are never stored; at most one primary per item and never a facet; unsure-after-fetch never reaches clustering; resume re-asks only questions about edited labels; YAML validation errors name the offending label; backoff retries 429/529 and stops on 401/422.
+- **Config:** `DecisionConfig {backend = typesafe|grok|off, model = jev-1.14.0, concurrency = 8, max_retries = 6}`; `TaxonomyConfig {cutoff = 0.8, extra_threshold = 0.85, candidates = 8, split_alpha = 0.05, split_stability = 0.6, null_replicates = 30, parent_threshold = 0.7, loop_min_move = 0.10, loop_max_iterations = 5, facets = []}`; description and embedding config as before.
+- **CLI:** `constella organize INPUT... --output-dir RUN [--embedding openai|local] [--decision typesafe|grok|off] [--cutoff 0.8] [--extra-threshold 0.85] [--facets region] [--audit]`, `constella organize --resume RUN`, `constella mcp` (stdio server).
+- **Jev client:** plain HTTPS, questions as an object, exponential backoff with jitter on 429/529/5xx, no retry on other 4xx, every response cached on disk, key-shaped strings redacted from stored errors.
+- **Privacy:** models and MCP clients receive only display name, registrable domain, generated description, and on fallback the public homepage title and meta description (emails and phone numbers stripped). Tool responses follow the same rule. Usernames, addresses, URL paths and query strings never leave the machine.
+- **Tests (offline, fakes for chat, decision and embedding):** split test rejects structureless data and accepts planted clusters; no item lost by split or merge; ancestors never stored; one primary per item, never a facet; Miscellaneous sets a status and never creates a label; `score` refuses while `awaiting_approval`; `score(changed)` asks only new questions; the loop stops under the 10% rule; tool responses respect their token caps; resume re-asks only edited labels; backoff retries 429/529 and stops on 401/422.
 
-## 12. Milestones
+## 14. Milestones
 
-0. **Approval of this v3** and answers to §13. Nothing is built before this.
-1. Core models (`Label`, `Assignment`), DAG utilities, split and merge tests, exports. Offline tests.
-2. Description stage with batching, cache and homepage fallback.
-3. `decide()` with `typesafe`, `grok` and `off` backends; Jev client with backoff and cache.
-4. Top-level proposal, `labels_proposed.yaml`, `--resume`.
-5. Label assignment, thresholds, review list; `constella.records` adapter and the CLI.
-6. Real run on the full list (≈ $0.87), user review, README update.
+0. **Approval of this plan** and answers to §15. Nothing is built before this.
+1. Core models, DAG utilities, split and merge tests, `overview`, exports. Offline tests.
+2. `describe` with batching, cache and homepage fallback.
+3. `decide()` with `typesafe`, `grok` and `off` backends; `score` with the Miscellaneous option and the cutoff.
+4. `apply_labels`, the pause, `--resume`.
+5. MCP server (`constella mcp`) exposing the seven tools; `constella organize` as the built-in loop.
+6. `constella.records` adapter; real run on the full list (≈ $0.97); user review; README update.
 
-## 13. Open questions for the user
+## 15. Open questions for the user
 
-1. **Extra-label threshold.** Which rate do you want after reading `multi_label_examples.md`?
+1. **Confidence cutoff.**
+   A) 0.8: accepted labels about 97% correct in the audit, 19.6% of recognised items pending before the loop and 10.5% after — **recommended**;
+   B) 0.9: 34% pending before the loop, for about 3 more points of precision;
+   C) 0.7: 13.5% pending, but the [0.7, 0.8) band was only 60% correct.
+2. **Items between 0.5 and the cutoff.**
+   A) keep their best label as `tentative`, flagged in the outputs — **recommended**;
+   B) show them as Unclustered until they pass the cutoff.
+3. **Unrecognised items.** Scored on guessed descriptions, 79 of 161 reached 0.8 but only about 65% of an audited sample were right.
+   A) keep them Unclustered — **recommended**;
+   B) give them `tentative` labels marked "guessed";
+   C) add a web-search step for them before the loop (new cost and a new data flow).
+4. **New top-level labels proposed inside the loop** (two appeared: technology product companies, non-health insurance).
+   A) apply them and list them for review in `labels_proposed.yaml` — **recommended**;
+   B) pause again for approval each time;
+   C) allow only sub-labels in the loop.
+5. **Who proposes labels in MCP mode.**
+   A) the calling agent, with `constella organize` using Grok for the same role — **recommended**;
+   B) always server-side Grok, so results do not depend on the client model;
+   C) server asks the client model through MCP sampling.
+6. **Image tool.** The test was mildly positive but not conclusive.
+   A) keep `render` as an optional tool — **recommended**;
+   B) drop it from the first release;
+   C) run a larger test first (about $0.50 for five runs per arm).
+7. **Extra-label threshold.**
    A) τ = 0.85, 9.8% of labeled items — **recommended**;
    B) τ = 0.80, 14.5%;
    C) τ = 0.90, 5.3%.
-2. **Large labels with no stable sub-structure.** The split test left "AI tools and platforms" (82 items), "Identity and security" (48) and "Jobs and careers" (47) without sub-labels.
-   A) leave them flat, as the data says — **recommended for the first release**;
-   B) for labels above √N items that fail the test, let Grok propose sub-labels, marked `origin: grok` and shown at a second pause;
-   C) lower the stability bar from 0.6 to 0.5 (splits the AI-tools label, with less reproducible children).
-3. **Sub-label granularity.** The rule produced 110 sub-labels with a median of 7 items.
-   A) keep (smallest stable cut within one null standard deviation of the best) — **recommended**;
-   B) coarser: take the first cut that beats the null and recurse, giving fewer, larger sub-labels and a third level, at lower stability;
-   C) keep the rule but raise the minimum useful size from ½·log₂N (5) to log₂N (10).
-4. **Login and sign-in pages.** "Identity and security" became the primary label for sign-in pages of unrelated services.
-   A) tell the describer to describe the service behind the domain, not the login page, and narrow the label definition to identity providers and password tools — **recommended**;
-   B) keep the primary as is and rely on the extra label;
-   C) add an `access` facet for login portals, like the region facet.
-5. **Multi-parent labels.** Only one label reached the 0.7 bar for a second parent.
-   A) keep 0.7 — **recommended**;
-   B) lower to 0.5 (six labels, two of them wrong) and list them in the review file;
-   C) let Grok propose second parents when it names the labels.
-6. **A second pause.** Should the run also stop after the sub-labels are built and named?
-   A) no, one pause; edit `labels.yaml` afterwards and `--resume` again if needed — **recommended**;
-   B) yes, always pause twice.
-7. **Region facet.** Grok proposed India and United States facets (168 and 176 items at p ≥ 0.8).
-   A) off by default, enabled with `--facets region` — **recommended**;
-   B) on by default;
-   C) drop facets from the first release.
-8. **Top-level size hint.** Without a hint Grok proposed 41 labels; with the √N hint, 19.
-   A) keep the √N hint — **recommended**;
-   B) no hint, and merge at the pause;
-   C) add a `--top-level broad|fine` switch.
+8. **Login and sign-in pages** took "Identity and security" as primary.
+   A) tell the describer to describe the service behind the domain, and narrow that label to identity providers and password tools — **recommended**;
+   B) keep the primary and rely on the extra label;
+   C) add an `access` facet for login portals.
+9. **Large labels with no stable sub-structure** (AI tools 82 items, Identity 48, Jobs 47).
+   A) leave it to the loop: the agent may add sub-labels there when pending items cluster — **recommended**;
+   B) always ask the LLM for sub-labels of any label above √N items that fails the split test;
+   C) lower the stability bar from 0.6 to 0.5.
+10. **Sub-label granularity** (110 sub-labels, median 7 items).
+    A) keep the rule — **recommended**;
+    B) coarser: first cut that beats the null, then recurse (fewer, larger sub-labels, a third level, lower stability);
+    C) raise the minimum useful size from ½·log₂N (5) to log₂N (10).
+11. **Region facet** (India 168 items, United States 176 at p ≥ 0.8).
+    A) off by default, `--facets region` — **recommended**;
+    B) on by default;
+    C) drop facets from the first release.
+12. **Multi-parent labels.** One label reached 0.7 for a second parent.
+    A) keep 0.7 and let the agent add parents with `set_parents` — **recommended**;
+    B) lower to 0.5 (six labels, two of them wrong).
 
 ## Appendix A — Top labels of the v3 run
 
-Counts are items carrying the label or any descendant (primary or extra).
+Items carrying the label or any descendant (primary or extra), at the v3 acceptance rule, before the loop.
 
 | Top label | Items | Directly on the label | Sub-labels |
 | --- | --- | --- | --- |
@@ -283,7 +356,7 @@ Example sub-labels: under Banking and investing — bank account portals, crypto
 
 ## Appendix B — Split test per top label
 
-m = primary members at filing; z = standardised gap at the chosen k; stability = mean adjusted Rand index over ten 80% subsamples; Jev = veto `noul` (≥ 0.5 allows the split).
+m = primary members; z = standardised gap at the chosen k; stability = mean adjusted Rand index over ten 80% subsamples; Jev = veto `noul` (≥ 0.5 allows the split).
 
 | Top label | m | Result | k | z | Stability | Jev |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -298,7 +371,7 @@ m = primary members at filing; z = standardised gap at the chosen k; stability =
 | Banking and investing | 62 | split | 10 | 7.8 | 0.68 | 0.92 |
 | Government and civic services | 53 | split | 5 | 5.3 | 0.77 | 0.90 |
 | Health care | 52 | split | 10 | 7.0 | 0.62 | 0.88 |
-| Jobs and careers | 52 | not split: no cut beats the null (p = 0.39) | – | 1.4 max | – | – |
+| Jobs and careers | 52 | not split (p = 0.39) | – | 1.4 max | – | – |
 | Fitness and wellness | 39 | not split (p = 0.16) | – | 2.0 max | – | – |
 | Payments and transfers | 38 | not split (p = 0.23) | – | 1.5 max | – | – |
 | Identity and security | 37 | not split (p = 0.36) | – | 1.3 max | – | – |
@@ -307,10 +380,10 @@ m = primary members at filing; z = standardised gap at the chosen k; stability =
 | Food delivery | 27 | split | 4 | 2.9 | 0.84 | 0.89 |
 | Startups and crowdfunding | 25 | not split (p = 0.94) | – | −0.6 max | – | – |
 
-k counts the clusters of the cut; clusters under 3 items are not turned into labels, so the number of sub-labels can be lower. All 22 sub-labels large enough to test (≥ 10 members) failed the null test, which is why there is no third level.
+Clusters under 3 items do not become labels, so the number of sub-labels can be lower than k. All 22 sub-labels large enough to test (≥ 10 members) failed the null test, which is why there is no third level.
 
 ## Appendix C — Sources
 
 - Jev: https://docs.typesafe.ai/introduction/quickstart, https://docs.typesafe.ai/models, https://docs.typesafe.ai/api/errors.md, https://api.typesafe.ai/openapi.json; hierarchical classification cookbook: https://docs.typesafe.ai/cookbooks/hierarchical_classification.md (notes gathered 2026-11-11).
 - Grok pricing: https://docs.x.ai/developers/pricing.
-- Experiment files in `~/acct_cleanup/experiments/`: `experiment_labels.md`, `multi_label_examples.md`, `jev_report.md`, `run_v3/` (`labels_proposed.yaml`, `labels_final.json`, `assignments.csv`, `items.csv`, `summary.json`, `build_report.json`), `agreement_v3.json`, `judge_v3.json`, `spend_ledger_v3.json`, scripts `10_`–`17_`.
+- Experiment files in `~/acct_cleanup/experiments/`: `experiment_labels.md`, `multi_label_examples.md`, `jev_report.md`, `loop_v3.json`, `image_test_v3.json`, `agreement_v3.json`, `judge_v3.json`, `spend_ledger_v3.json`, `run_v3/` (`labels_proposed.yaml`, `labels_final.json`, `assignments.csv`, `items.csv`, `summary.json`, `build_report.json`, `loop_placements.json`, `constellation.png`), scripts `10_`–`19_`.
