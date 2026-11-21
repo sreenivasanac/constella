@@ -1,35 +1,13 @@
-"""Constella package initialization with basic logging setup."""
+"""Constella: pure functions for organising a set of items with embedding groups and per-item label checks."""
 
-from __future__ import annotations
+from constella.groups import Group, group, nearest_groups
+from constella.jev import Answer, DiskCache, Jev, JevError, Question, Spend, ask_cached, estimate
+from constella.labels import Assignment, Label, assign, shortlist
+from constella.loop import LabelScores, score_labels, tree_hints
 
-import logging
-
-
-logging.basicConfig(level=logging.INFO)
-
-
-class _LiteLLMMessageFilter(logging.Filter):
-    """Strip leading newlines from LiteLLM logs and drop empty messages."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if record.name != "LiteLLM":
-            return True
-        message = record.getMessage()
-        stripped = message.lstrip("\n") if isinstance(message, str) else message
-        if not stripped:
-            return False
-        if stripped != message:
-            record.msg = stripped
-            record.args = ()
-        return True
-
-
-_litellm_logger = logging.getLogger("LiteLLM")
-_litellm_logger.addFilter(_LiteLLMMessageFilter())
-_litellm_logger.propagate = False
+__version__ = "0.2.0"
 
 __all__ = [
-    "__version__",
+    "Answer", "Assignment", "DiskCache", "Group", "Jev", "JevError", "Label", "LabelScores", "Question", "Spend",
+    "ask_cached", "assign", "estimate", "group", "nearest_groups", "score_labels", "shortlist", "tree_hints",
 ]
-
-__version__ = "0.1.0"

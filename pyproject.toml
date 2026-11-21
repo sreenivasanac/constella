@@ -1,51 +1,34 @@
- [build-system]
- requires = ["setuptools>=68", "wheel"]
- build-backend = "setuptools.build_meta"
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
- [project]
- name = "constella"
- version = "0.1.0"
- description = "Auto-grouping and auto-labeling for text corpora"
- authors = [
-     {name = "Constella Contributors"}
- ]
- readme = "README.md"
+[project]
+name = "constella"
+version = "0.2.0"
+description = "Small library for organising a set of items: embedding groups to select, Jev to check each label per item"
+authors = [{name = "Constella Contributors"}]
+readme = "README.md"
 requires-python = ">=3.11"
- license = {text = "MIT"}
-classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Text Processing :: Linguistic",
-]
-keywords = ["clustering", "embeddings", "nlp", "text-analysis", "auto-labeling", "llm"]
- dependencies = [
-    "numpy>=2.3.3",
+license = {text = "MIT"}
+keywords = ["clustering", "embeddings", "labeling", "jev"]
+dependencies = [
+    "numpy>=2.0",
     "scikit-learn>=1.3",
-    "matplotlib>=3.7",
-    "umap-learn>=0.5.5",
-    "numba>=0.62.1",
-    "streamlit>=1.37",
-    "litellm>=1.79",
-    "psycopg>=3.2.12",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
-test = [
-     "pytest>=7.4",
-     "pytest-mock>=3.10",
- ]
+viz = ["umap-learn>=0.5.5", "matplotlib>=3.7"]  # only for `constella render`
 
- [tool.setuptools.packages.find]
- where = ["."]
- include = ["constella*"]
+[project.scripts]
+constella = "constella.runner:main"
 
-[tool.setuptools.package-data]
-"constella.visualization" = ["*.html"]
+[dependency-groups]
+dev = ["pytest>=7.4"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["constella*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
