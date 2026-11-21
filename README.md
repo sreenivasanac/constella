@@ -1,142 +1,105 @@
 # Constella
 
-Constella is a token-efficient auto-grouping and optional auto-labelling library for large text collections (emails, support tickets, bookmarks, document snippets, image captions). It couples scalable embeddings with deterministic clustering so that only a handful of representative texts ever reach an LLM.
+A small Python library for organising a set of items (bookmarks, posts, email threads, account names) without sending every item to an LLM.
 
-## Motivation
+It works in two moves:
 
-Processing tens of thousands of content units for auto-grouping and auto-labeling directly with an LLM quickly becomes cost prohibitive and yields poor quality results at long context windows. Constella avoids that trap by: (1) embedding every text with a provider-agnostic interface, (2) grouping items with deterministic K-Means, and (3) sampling only the most informative representatives for optional downstream labelling or analyst review.
+1. **Group to select.** Cut the items into at most 40 groups by embedding, read a few samples of each, pick a group, group it again. A group is a way to choose items. It is never applied as a label.
+2. **Check every label per item.** An agent or a person writes labels, each with a one-sentence definition. [TypeSafe Jev](https://docs.typesafe.ai) answers one yes/no question per item and candidate label, and returns a probability. An item takes the labels at 0.8 or above; the rest stay pending for the next round.
 
-## Key Capabilities
+The library is pure functions that a host application imports (Kosha does). A file runner covers a plain JSONL file.
 
-- **Token-aware embedding pipeline:** LiteLLM-backed providers for any LLM Embedding API (Fireworks, OpenAI etc). Automatically batch embedding requests, cap per-batch tokens, and run concurrently to maximize throughput while respecting provider limits.
-- **Deterministic clustering:** A dataclass-driven `ClusteringConfig` feeds multi-metric model selection (silhouette, elbow, Davies–Bouldin) before running K-Means with a fixed seed, producing reproducible cluster assignments and logging inertia diagnostics.
-- **Lightweight outputs:** Assigned Cluster IDs and clustering diagnostics live on the returned `ContentUnitCollection`, keeping the API surface compact while retaining provenance information.
-- **LLM-assisted auto-labelling:** Deterministic representative sampling plus LiteLLM OpenAI prompts yield structured labels (name, explanation, confidence, keywords) for each cluster.
-- **Visualization tooling:** Visualise the clusters in image format and D3.js-powered interactive HTML scatter views with hover tooltips, making manual inspection of clusters.
-- **Composable data models:** Lightweight dataclasses (`ContentUnit`, `ContentUnitCollection`) capture common ContentUnit attributes, and have embedding and cluster assignment values.
-
-## Architecture at a Glance
-
-- `constella.embeddings.adapters` — LiteLLM providers for Fireworks and OpenAI with concurrency, token-count heuristics, and configurable API bases.
-- `constella.clustering.kmeans` — K-Means runner with candidate search, metric scoring.
-- `constella.labeling.selection` — Representative sampling yielding centroid-aligned core samples plus diversity picks for downstream labelling.
-- `constella.visualization.umap` — UMAP projection plus static and interactive plotting utilities.
-- `constella.labeling.llm` — Prompt orchestration, LiteLLM OpenAI calls, and JSON parsing for cluster auto-labelling.
-- `constella.pipelines.workflow.cluster_texts` — End-to-end orchestrator that normalizes inputs, generates embeddings, runs clustering, and optionally persists visualizations, returning the enriched collection.
-- `constella.config.schemas` / `constella.data.models` — dataclasses that capture reproducible configuration and output artefacts.
-- `scripts.quora_analysis_pipeline` — CLI runner for the Quora dataset that saves cluster assignments and reports generated artifacts.
-
-## Workflow
-
-1. Pass a `ContentUnitCollection` into `cluster_texts` with an optional `ClusteringConfig` (or overrides) and `VisualizationConfig`.
-2. The Fireworks provider (or a configured alternative) embeds the texts using LiteLLM with CPU-bound batching and token budgeting.
-3. Candidate cluster sizes are evaluated with silhouette, elbow, and Davies–Bouldin heuristics before selecting the final `k`.
-4. A seeded K-Means run produces cluster assignments.
-5. Call `get_labels` (or pass a `LabelingConfig` to `cluster_texts`) to obtain structured auto-labels using LiteLLM OpenAI. It uses representative sampling to extract centroid-aligned plus diverse examples per cluster.
-6. If visualization is enabled, embeddings are projected with UMAP and saved to disk as PNG and/or D3.js-based interactive HTML artifacts for downstream review.
-
-## Advantages
-
-- **Token efficiency:** Only cluster representatives need to be sent to an LLM, compressing label costs by orders of magnitude for large corpora.
-- **Scalability:** Batch-friendly embedding requests and optional concurrency keep throughput high even for 10k+ documents.
-- **Reproducibility:** Frozen configs and seeded algorithms make it easy to compare runs and debug drift.
-- **Model agnosticism:** Any LiteLLM-compatible embedding backend can be registered without altering the pipeline.
-- **Analyst-friendly outputs:** Static and interactive plots, plus structured assignment objects, integrate cleanly with dashboards or notebooks.
-
-## Example Use Cases
-
-- Organising bookmark collections into topic folders before syncing back into productivity tools.
-- Email or chat triage that groups messages by intent ahead of routing or prioritisation.
-- Labelling document repositories, research papers, or knowledge bases by discovered themes.
-- Surfacing recurring customer feedback issues by clustering support tickets or product reviews.
-- Topic discovery inside news archives or competitive intelligence datasets.
-
-## Getting Started
+## Install
 
 ```bash
-pip install -e .
-
-# Fireworks AI API key needed for embedding step
-export FIREWORKS_AI_API_KEY="your-fireworks-key"
-
-
-# Auto labelling step uses LiteLLM to connect with any model.
-# The example model for auto labelling uses OpenAI model.
-# OpenAI API key is required for example model.
-# If any other model you want to use for auto-labeling step, you can change the labeling configuration, and provide related Model API Key. 
-export OPENAI_API_KEY="sk-your-openai-key"
-
+uv add git+https://github.com/sreenivasanac/constella  # or: uv sync, inside a clone
+export TYPESAFE_API_KEY=...                     # only for Jev calls
 ```
 
-To run the tests locally:
+Python 3.11 or later. Dependencies: numpy, scikit-learn, httpx.
+
+## Library
+
+```python
+import numpy as np
+from constella import Jev, DiskCache, Label, Question, ask_cached, group, nearest_groups, score_labels, tree_hints
+
+vectors = np.load("vectors.npy")            # float32, one row per item; the host computes these
+items = [{"id": 1, "title": "…", "text": "…"}, ...]
+ids = [i["id"] for i in items]
+
+# 1. Group, look, zoom
+groups = group(vectors, ids)                 # at most 40, largest first, same ids every run
+g = groups[0]
+g.size, g.cohesion, g.central, g.spread      # count, tightness, ids near the centre, ids at the edges
+nearest_groups(groups)[g.id]                 # [(other group id, similarity), ...]
+rows = [ids.index(i) for i in g.ids]
+subgroups = group(vectors[rows], g.ids)      # a second level
+
+# 2. Labels, checked per item
+labels = [Label("rag", "AI/RAG", "Retrieval-augmented generation: retrieving documents to ground an LLM's answer.")]
+label_vectors = embed([l.definition for l in labels])    # your embedding function, same model as the items
+result = score_labels(items, labels, vectors, label_vectors, Jev(), DiskCache("answers.sqlite"))
+
+result.assignments[1].primary                # ("rag", 0.93) or None
+result.pending                               # ids with no label at 0.8 or above
+result.spend                                 # requests, input_tokens, usd, asked, cached
+tree_hints(result.assignments, labels)       # {"empty": [...], "broad": [...], "overlap": [...], "sizes": {...}}
+
+# One question over many items, 100 items per request
+q = Question("Is this post about robotics?")
+answers, spend = ask_cached(Jev(), [(q, i["id"], i["text"][:2000]) for i in items], DiskCache("answers.sqlite"))
+```
+
+Calling `score_labels` again with the same cache sends only the questions that were never asked: a new label, a rewritten definition, a changed item. Changing the cut-off re-asks nothing.
+
+| Function | What it returns |
+| --- | --- |
+| `group(vectors, ids, k=None, max_groups=40, seed=0)` | `Group`s: `id, ids, size, centroid, cohesion, central, spread` |
+| `nearest_groups(groups, n=2)` | the n closest groups for each group |
+| `shortlist(item_vectors, label_vectors, n=8)` | indices of the n nearest labels per item |
+| `assign(scores, accept=0.8)` | per item: `primary, secondary, others, doubtful`, and `pending` |
+| `score_labels(items, labels, vectors, label_vectors, jev, cache=None, accept=0.8)` | `assignments, pending, spend, scores` |
+| `tree_hints(assignments, labels)` | empty, too-broad and overlapping labels, from counts |
+| `Jev().ask(pairs, by="question")`, `await Jev().ask_async(...)` | answers and spend for `(Question, item id, text)` pairs |
+| `estimate(pairs, by)` | the expected spend, without calling the API |
+| `ask_cached(jev, pairs, cache, by)` | the same, asking only what the cache lacks |
+
+A cache is any object with `get_many(keys)` and `put_many({key: answer})`; a key is `(question hash, item id, text hash)`. `DiskCache(path)` is a SQLite file.
+
+Vectors are numpy float32 arrays. Python lists of floats are rejected.
+
+## File runner
+
+Items are JSON lines: `{"id": ..., "text": ..., "title": ..., "metadata": {...}}` (`title` and `metadata` optional).
 
 ```bash
-.venv/bin/python -m pip install -e .[test]
-.venv/bin/python -m pytest
+uv run constella embed items.jsonl -w ws                 # OpenAI by default; --provider voyage; or --vectors pre.npy
+uv run constella overview -w ws                          # groups, counts, three 100-character samples each
+uv run constella overview -w ws --group 3                # group 3 again; --pending for unlabelled items
+uv run constella apply-labels labels.json -w ws          # [{"id", "path", "definition", "seed"?}, ...]
+uv run constella score -w ws --sample 300                # dry run, nothing saved
+uv run constella score -w ws                             # refuses above $0.50 unless --max-usd is raised
+uv run constella export -w ws -o labelled.jsonl
+uv run constella render -w ws                            # optional PNG map; needs `uv sync --extra viz`
 ```
 
-## Usage
+The overview is capped at about 4,000 tokens whatever the number of items, so an agent can read it.
 
-```python
-from pathlib import Path
+## Cost
 
-from constella.config.schemas import ClusteringConfig, VisualizationConfig
-from constella.data.models import ContentUnit, ContentUnitCollection
-from constella.embeddings.adapters import LiteLLMEmbeddingFireworksProvider
-from constella.pipelines.workflow import cluster_texts
+Measured on 719 X posts on 2026-11-21 (`agentic_development_docs/measurements_2026-11-21_jev.md`):
 
-units = ContentUnitCollection([
-    ContentUnit(identifier="doc_1", text="First document", metadata1={"source": "faq"}),
-    ContentUnit(identifier="doc_2", text="Second document", metadata1={"source": "faq"}),
-    ContentUnit(identifier="doc_3", text="Third document", metadata1={"source": "faq"}),
-])
+- Jev bills input tokens at $0.042 per million. Each request costs about 260 tokens before its content, and the shared state is billed once per request, so the client packs many questions into each request.
+- One question over many items: about 170 tokens per item at 600 characters of text.
+- Label scoring, 8 candidate labels per item: about 1,000 tokens per item, $0.04 per 1,000 items.
 
-# Calling clustering workflow with default settings
-collection = cluster_texts(units)
+## Tests
 
-# Calling clustering workflow with explicit parameters
-collection = cluster_texts(
-    units,
-    clustering_config=ClusteringConfig(
-        fallback_n_clusters=2,
-    ),
-    visualization_config=VisualizationConfig(
-        output_path=Path("/tmp/constella/umap.png"),
-    ),
-    embedding_provider=LiteLLMEmbeddingFireworksProvider(),
-)
-
-if collection.metrics:
-    metrics = collection.metrics
-    print("Number of Clusters:", metrics.n_clusters)
-    print("Silhouette score:", metrics.silhouette_score)
-
-if collection.artifacts:
-    artifacts = collection.artifacts
-    print("Static visualization:", artifacts.static_plot)
-    print("Interactive visualization:", artifacts.html_plot)
-```
-`collection` contains cluster assignments on each `ContentUnit`, along with an optional `ClusteringMetrics` snapshot and any generated `VisualizationArtifacts` paths.
-
-To auto-label the resulting clusters, sample representatives and invoke the labelling helper:
-
-```python
-from constella.config.schemas import LabelingConfig, RepresentativeSelectionConfig
-from constella.labeling.selection import select_representatives
-from constella.labeling.llm import get_labels
-
-# sample up to 20 representatives per cluster before labelling
-select_config = RepresentativeSelectionConfig(n_representatives=20, core_ratio=0.6)
-select_representatives(collection, select_config)
-
-label_config = LabelingConfig(
-    model="gpt-4o-mini",
-    temperature=0.1,
-)
-
-labels = get_labels(collection, label_config)
-for cluster_id, result in labels.items():
-    print(cluster_id, result.label, result.confidence)
+```bash
+uv run pytest
 ```
 
-`get_labels` defaults to the OpenAI LiteLLM provider; ensure `OPENAI_API_KEY` is set before calling it. Each `LabelResult` supplies the cluster label, explanation, confidence score, and associated keywords.
+## Design notes
+
+`agentic_development_docs/project_design_plan/library_v2_notes.md` says what changed from the earlier design and why. The older plans are kept next to it.
